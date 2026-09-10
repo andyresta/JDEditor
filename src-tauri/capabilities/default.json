@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window and the area-selector overlay",
+  "windows": ["main", "area-selector"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-create",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "opener:default",
+    "opener:allow-reveal-item-in-dir",
+    "dialog:default",
+    "fs:default",
+    "fs:allow-remove"
+  ]
+}

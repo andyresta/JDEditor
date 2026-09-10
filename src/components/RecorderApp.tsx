@@ -1,0 +1,353 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { api } from "../api";
+import { RecordingsList } from "./RecordingsList";
+import {
+  DeviceList,
+  FPS_OPTIONS,
+  QUALITY_LABELS,
+  QualityPreset,
+  Rect,
+  RecordingFile,
+} from "../types";
+
+function formatElapsed(seconds: number): string {
+  const m = Math.floor(seconds / 60)
+    .toString()
+    .padStart(2, "0");
+  const s = Math.floor(seconds % 60)
+    .toString()
+    .padStart(2, "0");
+  return `${m}:${s}`;
+}
+
+export function RecorderApp() {
+  const [devices, setDevices] = useState<DeviceList | null>(null);
+  const [ffmpegAvailable, setFfmpegAvailable] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const [screenId, setScreenId] = useState<string>("");
+  const [includeWebcam, setIncludeWebcam] = useState(false);
+  const [webcamId, setWebcamId] = useState<string>("");
+  const [includeAudio, setIncludeAudio] = useState(false);
+  const [audioId, setAudioId] = useState<string>("");
+  const [quality, setQuality] = useState<QualityPreset>("medium");
+  const [fps, setFps] = useState<number>(30);
+  const [area, setArea] = useState<Rect | null>(null);
+
+  const [isRecording, setIsRecording] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [lastOutput, setLastOutput] = useState<string | null>(null);
+  const [recordings, setRecordings] = useState<RecordingFile[]>([]);
+
+  const pollRef = useRef<number | null>(null);
+
+  const refreshRecordings = useCallback(() => {
+    api.listRecordings().then(setRecordings).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    api
+      .checkFfmpeg()
+      .then(setFfmpegAvailable)
+      .catch(() => setFfmpegAvailable(false));
+
+    api
+      .listDevices()
+      .then((list) => {
+        setDevices(list);
+        const primary = list.screens.find((s) => s.is_primary) ?? list.screens[0];
+        if (primary) setScreenId(primary.id);
+        if (list.webcams[0]) setWebcamId(list.webcams[0].id);
+        if (list.audio_inputs[0]) setAudioId(list.audio_inputs[0].id);
+      })
+      .catch((e) => setError(String(e)));
+
+    refreshRecordings();
+
+    const unlistenPromise = listen<Rect | null>("area-selected", (event) => {
+      setArea(event.payload);
+    });
+
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [refreshRecordings]);
+
+  useEffect(() => {
+    if (!isRecording) {
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      return;
+    }
+    pollRef.current = window.setInterval(async () => {
+      const status = await api.recordingStatus();
+      setIsRecording(status.is_recording);
+      setElapsed(status.elapsed_seconds);
+      if (!status.is_recording) {
+        setLastOutput(status.output_path);
+        refreshRecordings();
+      }
+    }, 1000);
+    return () => {
+      if (pollRef.current) window.clearInterval(pollRef.current);
+    };
+  }, [isRecording, refreshRecordings]);
+
+  async function handleSelectArea() {
+    setError(null);
+    try {
+      await api.openAreaSelector();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleToggleRecording() {
+    setError(null);
+    if (isRecording) {
+      try {
+        const path = await api.stopRecording();
+        setIsRecording(false);
+        setElapsed(0);
+        setLastOutput(path);
+        refreshRecordings();
+      } catch (e) {
+        setError(String(e));
+      }
+      return;
+    }
+
+    if (!screenId) {
+      setError("Select a screen to record.");
+      return;
+    }
+    if (includeWebcam && !webcamId) {
+      setError("Select a webcam, or turn off webcam recording.");
+      return;
+    }
+    if (includeAudio && !audioId) {
+      setError("Select an audio source, or turn off audio recording.");
+      return;
+    }
+
+    try {
+      const path = await api.startRecording({
+        screen_id: screenId,
+        area,
+        include_webcam: includeWebcam,
+        webcam_id: includeWebcam ? webcamId : null,
+        include_audio: includeAudio,
+        audio_id: includeAudio ? audioId : null,
+        quality,
+        fps,
+        output_dir: null,
+      });
+      setLastOutput(path);
+      setIsRecording(true);
+      setElapsed(0);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleDelete(path: string) {
+    try {
+      await api.deleteRecording(path);
+      refreshRecordings();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  if (ffmpegAvailable === false) {
+    return (
+      <main className="container">
+        <h1>JDEditor</h1>
+        <div className="banner banner-error">
+          <p>
+            <strong>ffmpeg was not found.</strong> JDEditor uses ffmpeg to capture
+            your screen, webcam and audio. Install it and restart the app:
+          </p>
+          <ul>
+            <li>
+              <strong>Windows:</strong> <code>winget install ffmpeg</code> (or download
+              from ffmpeg.org and add it to PATH)
+            </li>
+            <li>
+              <strong>macOS:</strong> <code>brew install ffmpeg</code>
+            </li>
+            <li>
+              <strong>Linux:</strong> <code>sudo apt install ffmpeg</code> (or your
+              distro's package manager)
+            </li>
+          </ul>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="container">
+      <header className="app-header">
+        <h1>JDEditor</h1>
+        <p className="subtitle">Screen, webcam &amp; audio recorder</p>
+      </header>
+
+      {error && <div className="banner banner-error">{error}</div>}
+
+      <section className="panel">
+        <h2>Source</h2>
+        <div className="field">
+          <label htmlFor="screen-select">Screen</label>
+          <select
+            id="screen-select"
+            value={screenId}
+            disabled={isRecording}
+            onChange={(e) => setScreenId(e.target.value)}
+          >
+            {devices?.screens.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} ({s.width}x{s.height})
+                {s.is_primary ? " · Primary" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="field field-row">
+          <span>Area</span>
+          <div className="area-controls">
+            <span className="area-summary">
+              {area
+                ? `${area.width} x ${area.height} @ (${area.x}, ${area.y})`
+                : "Entire screen"}
+            </span>
+            <button onClick={handleSelectArea} disabled={isRecording}>
+              Select area
+            </button>
+            {area && (
+              <button
+                className="link-button"
+                onClick={() => setArea(null)}
+                disabled={isRecording}
+              >
+                Reset
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <h2>Webcam</h2>
+        <div className="field field-row">
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={includeWebcam}
+              disabled={isRecording}
+              onChange={(e) => setIncludeWebcam(e.target.checked)}
+            />
+            Include webcam
+          </label>
+          <select
+            value={webcamId}
+            disabled={isRecording || !includeWebcam}
+            onChange={(e) => setWebcamId(e.target.value)}
+          >
+            {devices?.webcams.length ? (
+              devices.webcams.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))
+            ) : (
+              <option value="">No webcams found</option>
+            )}
+          </select>
+        </div>
+      </section>
+
+      <section className="panel">
+        <h2>Audio</h2>
+        <div className="field field-row">
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={includeAudio}
+              disabled={isRecording}
+              onChange={(e) => setIncludeAudio(e.target.checked)}
+            />
+            Include audio
+          </label>
+          <select
+            value={audioId}
+            disabled={isRecording || !includeAudio}
+            onChange={(e) => setAudioId(e.target.value)}
+          >
+            {devices?.audio_inputs.length ? (
+              devices.audio_inputs.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))
+            ) : (
+              <option value="">No audio sources found</option>
+            )}
+          </select>
+        </div>
+      </section>
+
+      <section className="panel">
+        <h2>Quality &amp; frame rate</h2>
+        <div className="field field-row">
+          <label htmlFor="quality-select">Quality</label>
+          <select
+            id="quality-select"
+            value={quality}
+            disabled={isRecording}
+            onChange={(e) => setQuality(e.target.value as QualityPreset)}
+          >
+            {Object.entries(QUALITY_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field field-row">
+          <label htmlFor="fps-select">FPS</label>
+          <select
+            id="fps-select"
+            value={fps}
+            disabled={isRecording}
+            onChange={(e) => setFps(Number(e.target.value))}
+          >
+            {FPS_OPTIONS.map((f) => (
+              <option key={f} value={f}>
+                {f} fps
+              </option>
+            ))}
+          </select>
+        </div>
+      </section>
+
+      <section className="panel record-panel">
+        <button
+          className={`record-button ${isRecording ? "recording" : ""}`}
+          onClick={handleToggleRecording}
+        >
+          {isRecording ? `Stop  ${formatElapsed(elapsed)}` : "Start Recording"}
+        </button>
+        {!isRecording && lastOutput && (
+          <p className="last-output">Saved: {lastOutput}</p>
+        )}
+      </section>
+
+      <section className="panel">
+        <h2>Recordings</h2>
+        <RecordingsList recordings={recordings} onDelete={handleDelete} />
+      </section>
+    </main>
+  );
+}
