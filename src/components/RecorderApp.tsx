@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Dispatch, SetStateAction, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
 import { EditorShell } from "./EditorShell";
@@ -15,6 +15,39 @@ import {
 
 function basename(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
+}
+
+/** Fetches duration/resolution/thumbnail in the background and fills them
+ * in once ready, flipping the matching media item out of "preparing". */
+function preparePathAsync(
+  path: string,
+  setProjectMedia: Dispatch<SetStateAction<MediaItem[]>>,
+) {
+  api
+    .prepareMedia(path)
+    .then((info) => {
+      setProjectMedia((current) =>
+        current.map((m) =>
+          m.path === path
+            ? {
+                ...m,
+                status: "ready",
+                durationSeconds: info.duration_seconds,
+                width: info.width,
+                height: info.height,
+                thumbnailPath: info.thumbnail_path,
+              }
+            : m,
+        ),
+      );
+    })
+    .catch(() => {
+      // Metadata/thumbnail is a nice-to-have; playback doesn't need it, so
+      // just stop showing the "preparing" spinner.
+      setProjectMedia((current) =>
+        current.map((m) => (m.path === path ? { ...m, status: "ready" } : m)),
+      );
+    });
 }
 
 function formatElapsed(seconds: number): string {
@@ -57,9 +90,10 @@ export function RecorderApp() {
   }, []);
 
   const openInEditor = useCallback((path: string, name?: string) => {
-    setProjectMedia([{ path, name: name ?? basename(path) }]);
+    setProjectMedia([{ path, name: name ?? basename(path), status: "preparing" }]);
     setActiveMediaPath(path);
     setView("editor");
+    preparePathAsync(path, setProjectMedia);
   }, []);
 
   useEffect(() => {
@@ -180,14 +214,18 @@ export function RecorderApp() {
   async function handleImportMedia() {
     const picked = await api.pickMediaFiles();
     if (!picked || picked.length === 0) return;
-    setProjectMedia((current) => {
-      const existingPaths = new Set(current.map((m) => m.path));
-      const additions = picked
-        .filter((p) => !existingPaths.has(p))
-        .map((p) => ({ path: p, name: basename(p) }));
-      return [...current, ...additions];
-    });
-    setActiveMediaPath((current) => current ?? picked[0]);
+    const existingPaths = new Set(projectMedia.map((m) => m.path));
+    const newPaths = picked.filter((p) => !existingPaths.has(p));
+    if (newPaths.length === 0) return;
+
+    const additions: MediaItem[] = newPaths.map((p) => ({
+      path: p,
+      name: basename(p),
+      status: "preparing",
+    }));
+    setProjectMedia((current) => [...current, ...additions]);
+    setActiveMediaPath((current) => current ?? newPaths[0]);
+    newPaths.forEach((p) => preparePathAsync(p, setProjectMedia));
   }
 
   function handleNewProject() {
@@ -198,9 +236,14 @@ export function RecorderApp() {
   async function handleOpenProject() {
     const picked = await api.pickMediaFiles();
     if (!picked || picked.length === 0) return;
-    const items: MediaItem[] = picked.map((p) => ({ path: p, name: basename(p) }));
+    const items: MediaItem[] = picked.map((p) => ({
+      path: p,
+      name: basename(p),
+      status: "preparing",
+    }));
     setProjectMedia(items);
     setActiveMediaPath(items[0].path);
+    picked.forEach((p) => preparePathAsync(p, setProjectMedia));
   }
 
   if (view === "editor") {

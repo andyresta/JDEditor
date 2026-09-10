@@ -20,6 +20,11 @@ record first, edit later.
   Project), but only playback, project navigation, and media import are
   wired up — actual editing (trim, cut, effects, export, saving a project
   file) is intentionally a "coming soon" placeholder for a future step.
+- Newly added media (a fresh recording, or anything picked via Import
+  Media/Open Project) shows a "Preparing…" spinner in the Media panel and
+  Preview while its duration, resolution and a thumbnail are fetched
+  asynchronously in the background (via `ffprobe`/`ffmpeg`); the UI never
+  blocks waiting for this.
 
 ## How it works
 
@@ -39,6 +44,10 @@ more reliable across three OSes than a custom capture stack. The Rust side
 - `overlay.rs` — opens a transparent, always-on-top window spanning every
   monitor so the user can drag-select a capture region.
 - `recordings.rs` — lists/deletes finished recordings from the output folder.
+- `media.rs` — asynchronously probes a media file with `ffprobe` (duration,
+  resolution) and extracts a thumbnail frame with `ffmpeg`, both best-effort
+  (a missing `ffprobe` or a probe failure degrades gracefully rather than
+  blocking playback).
 
 The frontend (`src/`) is a single Vite + React page; `App.tsx` renders either
 the main recorder UI or the area-selector overlay UI, based on which Tauri

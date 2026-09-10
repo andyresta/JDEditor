@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MenuBar, type MenuDef } from "./MenuBar";
-import type { MediaItem } from "../types";
+import { formatDuration, type MediaItem } from "../types";
 
 interface EditorShellProps {
   media: MediaItem[];
@@ -99,10 +99,30 @@ export function EditorShell({
                     <button
                       className={`media-list-item ${
                         m.path === activeMediaPath ? "active" : ""
-                      }`}
+                      } ${m.status === "preparing" ? "preparing" : ""}`}
                       onClick={() => onSelectMedia(m.path)}
                     >
-                      {m.name}
+                      <span className="media-thumb-wrap">
+                        {m.status === "preparing" ? (
+                          <span className="spinner" />
+                        ) : m.thumbnailPath ? (
+                          <img
+                            className="media-thumb"
+                            src={convertFileSrc(m.thumbnailPath)}
+                            alt=""
+                          />
+                        ) : (
+                          <span className="media-thumb media-thumb-placeholder">🎬</span>
+                        )}
+                      </span>
+                      <span className="media-item-text">
+                        <span className="media-item-name">{m.name}</span>
+                        <span className="media-item-meta">
+                          {m.status === "preparing"
+                            ? "Preparing…"
+                            : formatDuration(m.durationSeconds)}
+                        </span>
+                      </span>
                     </button>
                   </li>
                 ))}
@@ -113,7 +133,12 @@ export function EditorShell({
 
         <div className="editor-center">
           <div className="editor-preview">
-            {activeMedia ? (
+            {activeMedia && activeMedia.status === "preparing" ? (
+              <div className="preview-preparing">
+                <span className="spinner spinner-lg" />
+                <p>Preparing video for editing…</p>
+              </div>
+            ) : activeMedia ? (
               <video
                 key={activeMedia.path}
                 src={convertFileSrc(activeMedia.path)}
@@ -143,10 +168,11 @@ export function EditorShell({
                     key={m.path}
                     className={`timeline-clip ${
                       m.path === activeMediaPath ? "active" : ""
-                    }`}
+                    } ${m.status === "preparing" ? "preparing" : ""}`}
                     onClick={() => onSelectMedia(m.path)}
                     title={m.name}
                   >
+                    {m.status === "preparing" ? <span className="spinner" /> : null}
                     {m.name}
                   </button>
                 ))

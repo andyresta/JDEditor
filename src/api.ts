@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   DeviceList,
+  MediaPrepared,
   Rect,
   RecordingConfig,
   RecordingFile,
@@ -27,4 +28,6 @@ export const api = {
     invoke<void>("delete_recording", { path }),
   pickMediaFiles: () =>
     open({ multiple: true, filters: MEDIA_FILTERS }) as Promise<string[] | null>,
+  prepareMedia: (path: string) =>
+    invoke<MediaPrepared>("prepare_media", { path }),
 };

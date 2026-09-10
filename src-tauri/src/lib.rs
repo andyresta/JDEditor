@@ -1,4 +1,5 @@
 mod devices;
+mod media;
 mod models;
 mod overlay;
 mod recorder;
@@ -57,6 +58,11 @@ fn delete_recording(path: String) -> Result<(), String> {
     recordings::delete(&path)
 }
 
+#[tauri::command]
+fn prepare_media(app: tauri::AppHandle, path: String) -> Result<media::MediaPrepared, String> {
+    media::prepare(&app, &path)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -74,6 +80,7 @@ pub fn run() {
             submit_area_selection,
             list_recordings,
             delete_recording,
+            prepare_media,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

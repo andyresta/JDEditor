@@ -62,8 +62,34 @@ export const QUALITY_LABELS: Record<QualityPreset, string> = {
 
 export const FPS_OPTIONS = [24, 30, 60] as const;
 
+export interface MediaPrepared {
+  duration_seconds: number | null;
+  width: number | null;
+  height: number | null;
+  thumbnail_path: string | null;
+}
+
+export type MediaStatus = "preparing" | "ready";
+
 export interface MediaItem {
   path: string;
   name: string;
+  status: MediaStatus;
+  durationSeconds?: number | null;
+  width?: number | null;
+  height?: number | null;
+  thumbnailPath?: string | null;
+}
+
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return "";
+  const total = Math.round(seconds);
+  const m = Math.floor(total / 60)
+    .toString()
+    .padStart(2, "0");
+  const s = Math.floor(total % 60)
+    .toString()
+    .padStart(2, "0");
+  return `${m}:${s}`;
 }
 
