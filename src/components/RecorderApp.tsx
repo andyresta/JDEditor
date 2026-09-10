@@ -1,15 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
+import { EditorShell } from "./EditorShell";
 import { RecordingsList } from "./RecordingsList";
 import {
   DeviceList,
   FPS_OPTIONS,
+  MediaItem,
   QUALITY_LABELS,
   QualityPreset,
   Rect,
   RecordingFile,
 } from "../types";
+
+function basename(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
 
 function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60)
@@ -40,10 +46,20 @@ export function RecorderApp() {
   const [lastOutput, setLastOutput] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<RecordingFile[]>([]);
 
+  const [view, setView] = useState<"recorder" | "editor">("recorder");
+  const [projectMedia, setProjectMedia] = useState<MediaItem[]>([]);
+  const [activeMediaPath, setActiveMediaPath] = useState<string | null>(null);
+
   const pollRef = useRef<number | null>(null);
 
   const refreshRecordings = useCallback(() => {
     api.listRecordings().then(setRecordings).catch(() => {});
+  }, []);
+
+  const openInEditor = useCallback((path: string, name?: string) => {
+    setProjectMedia([{ path, name: name ?? basename(path) }]);
+    setActiveMediaPath(path);
+    setView("editor");
   }, []);
 
   useEffect(() => {
@@ -86,12 +102,13 @@ export function RecorderApp() {
       if (!status.is_recording) {
         setLastOutput(status.output_path);
         refreshRecordings();
+        if (status.output_path) openInEditor(status.output_path);
       }
     }, 1000);
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
-  }, [isRecording, refreshRecordings]);
+  }, [isRecording, refreshRecordings, openInEditor]);
 
   async function handleSelectArea() {
     setError(null);
@@ -111,6 +128,7 @@ export function RecorderApp() {
         setElapsed(0);
         setLastOutput(path);
         refreshRecordings();
+        openInEditor(path);
       } catch (e) {
         setError(String(e));
       }
@@ -157,6 +175,46 @@ export function RecorderApp() {
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  async function handleImportMedia() {
+    const picked = await api.pickMediaFiles();
+    if (!picked || picked.length === 0) return;
+    setProjectMedia((current) => {
+      const existingPaths = new Set(current.map((m) => m.path));
+      const additions = picked
+        .filter((p) => !existingPaths.has(p))
+        .map((p) => ({ path: p, name: basename(p) }));
+      return [...current, ...additions];
+    });
+    setActiveMediaPath((current) => current ?? picked[0]);
+  }
+
+  function handleNewProject() {
+    setProjectMedia([]);
+    setActiveMediaPath(null);
+  }
+
+  async function handleOpenProject() {
+    const picked = await api.pickMediaFiles();
+    if (!picked || picked.length === 0) return;
+    const items: MediaItem[] = picked.map((p) => ({ path: p, name: basename(p) }));
+    setProjectMedia(items);
+    setActiveMediaPath(items[0].path);
+  }
+
+  if (view === "editor") {
+    return (
+      <EditorShell
+        media={projectMedia}
+        activeMediaPath={activeMediaPath}
+        onSelectMedia={setActiveMediaPath}
+        onImportMedia={handleImportMedia}
+        onNewProject={handleNewProject}
+        onOpenProject={handleOpenProject}
+        onCloseProject={() => setView("recorder")}
+      />
+    );
   }
 
   if (ffmpegAvailable === false) {
@@ -346,7 +404,11 @@ export function RecorderApp() {
 
       <section className="panel">
         <h2>Recordings</h2>
-        <RecordingsList recordings={recordings} onDelete={handleDelete} />
+        <RecordingsList
+          recordings={recordings}
+          onOpen={(path, name) => openInEditor(path, name)}
+          onDelete={handleDelete}
+        />
       </section>
     </main>
   );

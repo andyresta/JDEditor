@@ -8,9 +8,11 @@ function formatSize(bytes: number): string {
 
 export function RecordingsList({
   recordings,
+  onOpen,
   onDelete,
 }: {
   recordings: RecordingFile[];
+  onOpen: (path: string, name: string) => void;
   onDelete: (path: string) => void;
 }) {
   if (recordings.length === 0) {
@@ -28,6 +30,7 @@ export function RecordingsList({
             </span>
           </div>
           <div className="recording-actions">
+            <button onClick={() => onOpen(r.path, r.name)}>Open in Editor</button>
             <button onClick={() => revealItemInDir(r.path)}>Show in folder</button>
             <button className="danger" onClick={() => onDelete(r.path)}>
               Delete

@@ -61,3 +61,9 @@ export const QUALITY_LABELS: Record<QualityPreset, string> = {
 };
 
 export const FPS_OPTIONS = [24, 30, 60] as const;
+
+export interface MediaItem {
+  path: string;
+  name: string;
+}
+

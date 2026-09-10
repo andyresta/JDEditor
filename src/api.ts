@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import type {
   DeviceList,
   Rect,
@@ -6,6 +7,10 @@ import type {
   RecordingFile,
   RecordingStatus,
 } from "./types";
+
+const MEDIA_FILTERS = [
+  { name: "Media", extensions: ["mp4", "mov", "mkv", "avi", "webm", "m4v"] },
+];
 
 export const api = {
   checkFfmpeg: () => invoke<boolean>("check_ffmpeg"),
@@ -20,4 +25,6 @@ export const api = {
   listRecordings: () => invoke<RecordingFile[]>("list_recordings"),
   deleteRecording: (path: string) =>
     invoke<void>("delete_recording", { path }),
+  pickMediaFiles: () =>
+    open({ multiple: true, filters: MEDIA_FILTERS }) as Promise<string[] | null>,
 };

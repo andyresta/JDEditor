@@ -12,6 +12,14 @@ record first, edit later.
 - Drag-to-select a custom capture area (or record the entire screen)
 - Quality presets (Low/Medium/High/Source) and selectable frame rate (24/30/60 fps)
 - A list of past recordings with "show in folder" and delete
+- When a recording finishes (Stop clicked, or the recording ends on its own),
+  the app automatically switches to an **editor placeholder** — a desktop
+  app-style shell (File/Edit/View menu bar, media/preview/properties panels,
+  a timeline strip) that plays back the recording. It has the standard menu
+  items you'd expect (New/Open/Save/Save As/Export/Import Media/Close
+  Project), but only playback, project navigation, and media import are
+  wired up — actual editing (trim, cut, effects, export, saving a project
+  file) is intentionally a "coming soon" placeholder for a future step.
 
 ## How it works
 
@@ -34,7 +42,11 @@ more reliable across three OSes than a custom capture stack. The Rust side
 
 The frontend (`src/`) is a single Vite + React page; `App.tsx` renders either
 the main recorder UI or the area-selector overlay UI, based on which Tauri
-window it's running in (checked via the window label).
+window it's running in (checked via the window label). Within the main
+window, `RecorderApp` switches between the recording form and
+`EditorShell` (the editor placeholder). Media playback in the editor uses
+Tauri's asset protocol (`convertFileSrc`), enabled in `tauri.conf.json` for
+locally-picked files.
 
 ## Prerequisites
 
