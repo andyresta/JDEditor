@@ -89,12 +89,25 @@ export function RecorderApp() {
     api.listRecordings().then(setRecordings).catch(() => {});
   }, []);
 
-  const openInEditor = useCallback((path: string, name?: string) => {
+  /** Switches into the editor immediately, showing `path` as a "preparing"
+   * media item. Used for the recording-just-stopped case, where we want the
+   * editor to appear at once instead of waiting on ffmpeg/ffprobe first. */
+  const addPreparingMedia = useCallback((path: string, name?: string) => {
     setProjectMedia([{ path, name: name ?? basename(path), status: "preparing" }]);
     setActiveMediaPath(path);
     setView("editor");
-    preparePathAsync(path, setProjectMedia);
   }, []);
+
+  /** Same, but for a file that's already finalized on disk (opening a past
+   * recording, or an import) — safe to kick off the metadata/thumbnail
+   * fetch right away. */
+  const openInEditor = useCallback(
+    (path: string, name?: string) => {
+      addPreparingMedia(path, name);
+      preparePathAsync(path, setProjectMedia);
+    },
+    [addPreparingMedia],
+  );
 
   useEffect(() => {
     api
@@ -156,15 +169,31 @@ export function RecorderApp() {
   async function handleToggleRecording() {
     setError(null);
     if (isRecording) {
+      // The output path is already known from when recording started, so
+      // jump into the editor right away instead of waiting for ffmpeg to
+      // finish flushing the file first — the media item's spinner covers
+      // that wait (and the metadata/thumbnail fetch after it).
+      const pendingPath = lastOutput;
+      setIsRecording(false);
+      setElapsed(0);
+      if (pendingPath) addPreparingMedia(pendingPath);
+
       try {
         const path = await api.stopRecording();
-        setIsRecording(false);
-        setElapsed(0);
         setLastOutput(path);
         refreshRecordings();
-        openInEditor(path);
+        if (pendingPath) {
+          preparePathAsync(path, setProjectMedia);
+        } else {
+          openInEditor(path);
+        }
       } catch (e) {
         setError(String(e));
+        if (pendingPath) {
+          setProjectMedia((current) =>
+            current.map((m) => (m.path === pendingPath ? { ...m, status: "ready" } : m)),
+          );
+        }
       }
       return;
     }

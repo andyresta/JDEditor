@@ -24,7 +24,10 @@ record first, edit later.
   Media/Open Project) shows a "Preparing…" spinner in the Media panel and
   Preview while its duration, resolution and a thumbnail are fetched
   asynchronously in the background (via `ffprobe`/`ffmpeg`); the UI never
-  blocks waiting for this.
+  blocks waiting for this. Clicking Stop switches to the editor
+  immediately — it doesn't wait for ffmpeg to finish flushing the file
+  first, that wait (plus the metadata/thumbnail fetch) happens behind the
+  same spinner.
 
 ## How it works
 
