@@ -1,7 +1,9 @@
 import { Dispatch, SetStateAction, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
 import { EditorShell } from "./EditorShell";
+import { Launcher } from "./Launcher";
 import { RecordingsList } from "./RecordingsList";
 import {
   DeviceList,
@@ -79,7 +81,7 @@ export function RecorderApp() {
   const [lastOutput, setLastOutput] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<RecordingFile[]>([]);
 
-  const [view, setView] = useState<"recorder" | "editor">("recorder");
+  const [view, setView] = useState<"launcher" | "recorder" | "editor">("launcher");
   const [projectMedia, setProjectMedia] = useState<MediaItem[]>([]);
   const [activeMediaPath, setActiveMediaPath] = useState<string | null>(null);
 
@@ -156,6 +158,17 @@ export function RecorderApp() {
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
   }, [isRecording, refreshRecordings, openInEditor]);
+
+  // The editor is meant to fill the screen; the launcher and recorder
+  // screens use the normal, centered window size.
+  useEffect(() => {
+    const win = getCurrentWindow();
+    if (view === "editor") {
+      win.maximize().catch(() => {});
+    } else {
+      win.unmaximize().catch(() => {});
+    }
+  }, [view]);
 
   async function handleSelectArea() {
     setError(null);
@@ -284,7 +297,16 @@ export function RecorderApp() {
         onImportMedia={handleImportMedia}
         onNewProject={handleNewProject}
         onOpenProject={handleOpenProject}
-        onCloseProject={() => setView("recorder")}
+        onCloseProject={() => setView("launcher")}
+      />
+    );
+  }
+
+  if (view === "launcher") {
+    return (
+      <Launcher
+        onSelectRecord={() => setView("recorder")}
+        onSelectEditor={() => setView("editor")}
       />
     );
   }
@@ -292,6 +314,9 @@ export function RecorderApp() {
   if (ffmpegAvailable === false) {
     return (
       <main className="container">
+        <button className="link-button back-link" onClick={() => setView("launcher")}>
+          &larr; Back
+        </button>
         <h1>JDEditor</h1>
         <div className="banner banner-error">
           <p>
@@ -318,6 +343,13 @@ export function RecorderApp() {
 
   return (
     <main className="container">
+      <button
+        className="link-button back-link"
+        disabled={isRecording}
+        onClick={() => setView("launcher")}
+      >
+        &larr; Back
+      </button>
       <header className="app-header">
         <h1>JDEditor</h1>
         <p className="subtitle">Screen, webcam &amp; audio recorder</p>

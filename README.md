@@ -6,6 +6,11 @@ record first, edit later.
 
 ## Features (step 1)
 
+- The app opens to a centered **launcher** with two choices: **Record** or
+  **Editor**. Record leads to the recording form below; Editor opens
+  `EditorShell` directly (with an empty project) and maximizes the window,
+  since the editor is meant to fill the screen. The window restores to its
+  normal centered size when you leave the editor (Close Project).
 - Screen recording, with a picker for which display to capture
 - Optional webcam overlay (picture-in-picture), with source selection
 - Optional audio recording, with source selection
@@ -55,10 +60,11 @@ more reliable across three OSes than a custom capture stack. The Rust side
 The frontend (`src/`) is a single Vite + React page; `App.tsx` renders either
 the main recorder UI or the area-selector overlay UI, based on which Tauri
 window it's running in (checked via the window label). Within the main
-window, `RecorderApp` switches between the recording form and
-`EditorShell` (the editor placeholder). Media playback in the editor uses
-Tauri's asset protocol (`convertFileSrc`), enabled in `tauri.conf.json` for
-locally-picked files.
+window, `RecorderApp` switches between three views: `Launcher` (the
+Record/Editor choice), the recording form, and `EditorShell` (the editor
+placeholder) — maximizing/restoring the window as it enters/leaves the
+editor view. Media playback in the editor uses Tauri's asset protocol
+(`convertFileSrc`), enabled in `tauri.conf.json` for locally-picked files.
 
 ## Prerequisites
 
