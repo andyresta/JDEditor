@@ -89,7 +89,7 @@ body {
 }
 
 .launcher-card:hover {
-  border-color: #396cd8;
+  border-color: #0fa958;
   transform: translateY(-2px);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.08);
 }
@@ -182,7 +182,7 @@ button {
 }
 
 button:hover:not(:disabled) {
-  border-color: #396cd8;
+  border-color: #0fa958;
 }
 
 button:disabled {
@@ -194,7 +194,7 @@ button.link-button {
   border: none;
   background: transparent;
   box-shadow: none;
-  color: #396cd8;
+  color: #0fa958;
   padding: 0.2em 0.4em;
 }
 
@@ -477,7 +477,7 @@ button.danger {
 
 .media-list-item.active {
   background: #dbeafe;
-  border-color: #396cd8;
+  border-color: #0fa958;
 }
 
 .media-list-item.preparing {
@@ -527,7 +527,7 @@ button.danger {
   width: 1rem;
   height: 1rem;
   border: 2px solid rgba(57, 108, 216, 0.25);
-  border-top-color: #396cd8;
+  border-top-color: #0fa958;
   border-radius: 50%;
   display: inline-block;
   animation: spin 0.7s linear infinite;
@@ -613,7 +613,7 @@ button.danger {
 .timeline-clip {
   height: 100%;
   min-width: 6rem;
-  background: #396cd8;
+  background: #0fa958;
   color: white;
   border: none;
   border-radius: 6px;
@@ -693,45 +693,848 @@ button.danger {
   }
 }
 
-/* Area selector overlay window */
-.area-selector {
-  width: 100vw;
-  height: 100vh;
-  background: rgba(0, 0, 0, 0.15);
-  cursor: crosshair;
-  position: relative;
-  overflow: hidden;
+/* Windows that float over the desktop (the area selector, the recorder
+   bar) have to drop the app-wide page background to actually be
+   see-through. */
+html.transparent-window,
+html.transparent-window body {
+  background: transparent;
 }
 
-.area-selector-hint {
+/* ---------------------------------------------------------------------
+   Capture window — the Record screen
+   --------------------------------------------------------------------- */
+
+.capture-window {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  height: 100vh;
+  padding: 0.6rem 1rem 1rem;
+  overflow-y: auto;
+  /* Set explicitly: this surface stays light, so it can't inherit the
+     light-on-dark text the app's dark-mode block sets on :root. */
+  color: #16181d;
+  background: linear-gradient(180deg, #f6fcf8 0%, #e4f3ea 100%);
+}
+
+.capture-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.capture-titlebar-spacer {
+  flex: 1;
+}
+
+.capture-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 0.95rem;
+  color: #4b5563;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+/* The app-wide `button:hover` rule sets a blue border and outranks a
+   single-class hover selector, so every hover rule here restates the
+   border colour it actually wants. */
+.capture-icon-button:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: transparent;
+}
+
+.capture-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.capture-logo {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 3.5px solid #0fa958;
+  background: #fff;
+}
+
+.capture-name {
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.capture-badge {
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  color: #4b5563;
+  background: #fff;
+  border: 1px solid #d3e7da;
+  border-radius: 999px;
+}
+
+.capture-switch {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  padding: 3px;
+  background: #fff;
+  border: 1px solid #d3e7da;
+  border-radius: 999px;
+}
+
+.capture-switch-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  font-size: 0.82rem;
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.capture-switch-option.selected {
+  background: #e6f7ee;
+  box-shadow: inset 0 0 0 1px #bfe8d0;
+  cursor: default;
+}
+
+.capture-switch-option:hover:not(.selected) {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.capture-error {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The 2x2 grid of capture modes */
+.capture-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+
+.capture-mode {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  padding: 0.9rem 0.5rem;
+  color: #1f2937;
+  background: #fff;
+  border: 1px solid #d3e7da;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, transform 0.06s;
+}
+
+.capture-mode:hover:not(:disabled):not(.selected) {
+  border-color: #c9c6c0;
+}
+
+.capture-mode:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.capture-mode.selected {
+  color: #0b7a41;
+  background: #e6f7ee;
+  border-color: #0fa958;
+  box-shadow: inset 0 0 0 1px #0fa958;
+}
+
+.capture-mode:disabled {
+  color: #9ca3af;
+  background: #f4faf6;
+  cursor: not-allowed;
+}
+
+.capture-mode-icon {
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.capture-mode-label {
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+/* Device rows: camera, microphone, system audio */
+.capture-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.capture-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem 0.6rem 0.5rem 0.7rem;
+  background: #fff;
+  border: 1px solid #d3e7da;
+  border-radius: 12px;
+}
+
+.capture-row-icon {
+  flex: none;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.capture-row-select {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  font-size: 0.84rem;
+  color: #1f2937;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.capture-row-select:disabled {
+  color: #9ca3af;
+  cursor: default;
+}
+
+.capture-row-empty {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.84rem;
+  color: #6b7280;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-toggle {
+  flex: none;
+  min-width: 46px;
+  padding: 4px 12px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #4b5563;
+  background: #e8f3ec;
+  border: 1px solid #d3e7da;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, transform 0.06s;
+}
+
+.capture-toggle:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.capture-toggle:hover:not(:disabled) {
+  border-color: #c3dfcd;
+}
+
+.capture-toggle.on {
+  color: #fff;
+  background: #0fa958;
+  border-color: #0fa958;
+}
+
+.capture-toggle.on:hover:not(:disabled) {
+  background: #0c8f4a;
+  border-color: #0c8f4a;
+}
+
+.capture-toggle:disabled,
+.capture-toggle-static {
+  color: #9ca3af;
+  background: #eef6f1;
+  cursor: not-allowed;
+}
+
+.capture-settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+
+.capture-settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.capture-settings select {
+  padding: 0.4rem 0.5rem;
+  font-size: 0.82rem;
+  background: #fff;
+  border: 1px solid #d3e7da;
+  border-radius: 9px;
+}
+
+.capture-start {
+  padding: 0.75rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #fff;
+  background: #0fa958;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(15, 169, 88, 0.32);
+  transition: background 0.12s, transform 0.07s, box-shadow 0.12s;
+}
+
+.capture-start:hover:not(:disabled) {
+  background: #0c8f4a;
+}
+
+/* Pressing it visibly commits — starting the capture devices takes a
+   moment, so the button has to acknowledge the click straight away. */
+.capture-start:active:not(:disabled) {
+  transform: scale(0.97);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.18);
+}
+
+.capture-start:disabled {
+  background: #8fcfab;
+  box-shadow: none;
+  cursor: progress;
+}
+
+.capture-hint {
+  margin: 0;
+  font-size: 0.74rem;
+  color: #6b7280;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-recordings {
+  font-size: 0.8rem;
+}
+
+.capture-recordings summary {
+  cursor: pointer;
+  color: #4b5563;
+  padding: 0.2rem 0;
+}
+
+/* ---------------------------------------------------------------------
+   Floating recorder bar window
+   --------------------------------------------------------------------- */
+
+.bar-shell {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  /* Room for the pill's shadow, which would otherwise be cut off by the
+     edge of the (tightly sized) window. */
+  padding: 8px;
+  width: fit-content;
+}
+
+.bar-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 14px;
+  white-space: nowrap;
+  /* Any part of the bar that isn't a control drags the window. */
+  cursor: grab;
+  color: #1f2937;
+  background: #fff;
+  border: 1px solid #d3e7da;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+}
+
+.bar-pill svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The record/stop control, which carries the elapsed time */
+.bar-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px 5px 9px;
+  font-family: inherit;
+  background: transparent;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.12s, transform 0.06s;
+}
+
+.bar-stop:hover:not(:disabled) {
+  background: #fef2f2;
+}
+
+.bar-stop:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.bar-stop-dot {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 2px solid #ef4444;
+  position: relative;
+  animation: bar-pulse 1.6s ease-in-out infinite;
+}
+
+.bar-stop-dot::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: #ef4444;
+}
+
+.bar-stop-dot-paused {
+  border-color: #f59e0b;
+  animation: none;
+}
+
+.bar-stop-dot-paused::after {
+  background: #f59e0b;
+}
+
+.bar-stop-time {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #ef4444;
+  font-variant-numeric: tabular-nums;
+  min-width: 2.9rem;
+  text-align: left;
+}
+
+/* Microphone, with the live level as an underline */
+.bar-mic {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px 0;
+  color: #374151;
+}
+
+.bar-mic-icon {
+  display: block;
+  line-height: 0;
+}
+
+.bar-mic-level {
+  display: block;
+  width: 22px;
+  height: 3px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #e5e7eb;
+}
+
+.bar-mic-level-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: #0fa958;
+  transition: width 70ms linear;
+}
+
+.bar-divider {
+  width: 1px;
+  height: 22px;
+  margin: 0 2px;
+  background: #d3e7da;
+}
+
+.bar-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: #374151;
+  background: transparent;
+  border: none;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.12s, transform 0.06s, color 0.12s;
+}
+
+.bar-icon-button:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+
+.bar-icon-button:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.bar-icon-button:disabled {
+  color: #9ca3af;
+  cursor: default;
+}
+
+.bar-icon-danger:hover:not(:disabled) {
+  color: #dc2626;
+  background: #fef2f2;
+}
+
+.bar-grip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  color: #9ca3af;
+  cursor: grab;
+  user-select: none;
+}
+
+.bar-grip:active {
+  cursor: grabbing;
+}
+
+/* Buttons used before recording starts (Select Area / Record / Close) */
+.bar-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 13px;
+  font-size: 0.84rem;
+  font-family: inherit;
+  color: #1f2937;
+  background: #e9f4ed;
+  border: 1px solid #d3e7da;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.12s, transform 0.07s, box-shadow 0.12s;
+}
+
+.bar-button:hover:not(:disabled) {
+  background: #dcebe2;
+  border-color: #c3dfcd;
+}
+
+.bar-button:active:not(:disabled) {
+  transform: scale(0.96);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.12);
+}
+
+.bar-button:disabled {
+  color: #9ca3af;
+  cursor: default;
+}
+
+.bar-button-primary {
+  color: #fff;
+  background: #0fa958;
+  border-color: #0fa958;
+}
+
+.bar-button-primary:hover:not(:disabled) {
+  background: #0c8f4a;
+  border-color: #0c8f4a;
+}
+
+.bar-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  font-size: 0.84rem;
+  color: #4b5563;
+}
+
+/* ffmpeg's explanation of a failure runs to several lines, and it's worth
+   reading in full rather than truncating to one. */
+.bar-error {
+  max-width: 560px;
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #fff;
+  background: rgba(127, 29, 29, 0.96);
+  border-radius: 10px;
+}
+
+@keyframes bar-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* ---------------------------------------------------------------------
+   Project save prompt, shown over the editor
+   --------------------------------------------------------------------- */
+
+.project-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Above the editor shell, which is itself fixed to the viewport. */
+  z-index: 200;
+  background: rgba(8, 24, 15, 0.45);
+}
+
+.project-modal {
+  width: min(420px, calc(100vw - 3rem));
+  padding: 1.2rem 1.3rem 1.1rem;
+  color: #10211a;
+  background: #ffffff;
+  border: 1px solid #cae7d6;
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(6, 40, 22, 0.3);
+}
+
+.project-modal h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1.05rem;
+}
+
+.project-modal p {
+  margin: 0 0 1rem;
+  font-size: 0.86rem;
+  color: #587264;
+  overflow-wrap: anywhere;
+}
+
+.project-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.project-modal-actions button {
+  padding: 0.45rem 0.95rem;
+  font-size: 0.85rem;
+  border-radius: 9px;
+}
+
+.project-modal-primary,
+.project-modal-primary:hover:not(:disabled) {
+  color: #ffffff;
+  background: #0fa958;
+  border-color: #0fa958;
+}
+
+.project-modal-primary:hover:not(:disabled) {
+  background: #0c8f4a;
+}
+
+/* Project-level failures (saving, opening) surface over the editor, which
+   has no banner of its own. */
+.project-error {
+  position: fixed;
+  left: 50%;
+  bottom: 1.2rem;
+  transform: translateX(-50%);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: min(640px, calc(100vw - 3rem));
+  padding: 0.6rem 0.9rem;
+  font-size: 0.8rem;
+  color: #fff;
+  background: rgba(127, 29, 29, 0.97);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
+  overflow-wrap: anywhere;
+}
+
+.project-error .link-button {
+  flex: none;
+  color: #fecaca;
+}
+
+/* Area selector overlay window */
+.area-selector {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  /* Left clear: the region below dims everything around itself, so what
+     gets captured stays at full brightness. */
+  background: transparent;
+}
+
+.area-region {
+  position: absolute;
+  cursor: move;
+  border: 2px solid #0fa958;
+  /* Dims the whole screen except this region, in one declaration. */
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45);
+}
+
+.area-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border: 2px solid #0fa958;
+  border-radius: 3px;
+}
+
+.area-handle-nw {
+  top: -7px;
+  left: -7px;
+  cursor: nwse-resize;
+}
+.area-handle-n {
+  top: -7px;
+  left: 50%;
+  margin-left: -6px;
+  cursor: ns-resize;
+}
+.area-handle-ne {
+  top: -7px;
+  right: -7px;
+  cursor: nesw-resize;
+}
+.area-handle-e {
+  top: 50%;
+  right: -7px;
+  margin-top: -6px;
+  cursor: ew-resize;
+}
+.area-handle-se {
+  bottom: -7px;
+  right: -7px;
+  cursor: nwse-resize;
+}
+.area-handle-s {
+  bottom: -7px;
+  left: 50%;
+  margin-left: -6px;
+  cursor: ns-resize;
+}
+.area-handle-sw {
+  bottom: -7px;
+  left: -7px;
+  cursor: nesw-resize;
+}
+.area-handle-w {
+  top: 50%;
+  left: -7px;
+  margin-top: -6px;
+  cursor: ew-resize;
+}
+
+.area-toolbar {
+  position: absolute;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: grab;
+  padding: 7px 9px;
+  color: #1f2937;
+  background: #fff;
+  border: 1px solid #d3e7da;
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  white-space: nowrap;
+}
+
+.area-grip {
+  padding: 0 2px;
+  color: #9ca3af;
+  user-select: none;
+}
+
+.area-size {
+  padding: 0 4px;
+  font-size: 0.82rem;
+  color: #4b5563;
+  font-variant-numeric: tabular-nums;
+}
+
+.area-toolbar button {
+  padding: 5px 13px;
+  font-size: 0.82rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.area-confirm {
+  color: #fff;
+  background: #0fa958;
+  border: 1px solid #0fa958;
+}
+
+.area-confirm:hover {
+  background: #0c8f4a;
+  border-color: #0c8f4a;
+}
+
+.area-confirm:active {
+  transform: scale(0.96);
+}
+
+.area-cancel {
+  color: #1f2937;
+  background: #e9f4ed;
+  border: 1px solid #d3e7da;
+}
+
+.area-cancel:hover {
+  background: #dcebe2;
+  border-color: #c3dfcd;
+}
+
+.area-hint {
   position: absolute;
   top: 1.5rem;
   left: 50%;
   transform: translateX(-50%);
-  background: rgba(0, 0, 0, 0.7);
-  color: white;
-  padding: 0.5rem 1rem;
-  border-radius: 8px;
-  font-size: 0.9rem;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.85rem;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.72);
+  border-radius: 999px;
   pointer-events: none;
-}
-
-.area-selector-box {
-  position: absolute;
-  border: 2px solid #22c55e;
-  background: rgba(34, 197, 94, 0.15);
-  pointer-events: none;
-}
-
-.area-selector-size {
-  position: absolute;
-  bottom: -1.6rem;
-  left: 0;
-  background: #22c55e;
-  color: white;
-  font-size: 0.75rem;
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
 }
 
 @media (prefers-color-scheme: dark) {

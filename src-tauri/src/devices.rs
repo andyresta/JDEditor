@@ -1,5 +1,4 @@
 use crate::models::{DeviceInfo, DeviceList, ScreenInfo};
-use std::process::Command;
 use tauri::Manager;
 
 /// Path to the ffmpeg binary to use: the bundled sidecar if one was shipped
@@ -79,19 +78,15 @@ pub fn screen_grab_source(index: usize) -> String {
     index.to_string()
 }
 
-pub fn list_webcams() -> Result<Vec<DeviceInfo>, String> {
-    platform::list_webcams()
-}
-
-pub fn list_audio_inputs() -> Result<Vec<DeviceInfo>, String> {
-    platform::list_audio_inputs()
-}
-
 pub fn list_all(app: &tauri::AppHandle) -> Result<DeviceList, String> {
+    // Webcams and audio inputs come from a single probe (one ffmpeg spawn)
+    // on platforms where both are read off the same device-listing command,
+    // instead of running that probe twice.
+    let (webcams, audio_inputs) = platform::list_capture_devices();
     Ok(DeviceList {
         screens: list_screens(app)?,
-        webcams: list_webcams().unwrap_or_default(),
-        audio_inputs: list_audio_inputs().unwrap_or_default(),
+        webcams,
+        audio_inputs,
     })
 }
 
@@ -106,6 +101,7 @@ pub fn debug_dump() -> String {
 mod platform {
     use super::*;
     use std::fs;
+    use std::process::Command;
 
     pub fn list_webcams() -> Result<Vec<DeviceInfo>, String> {
         let mut devices = Vec::new();
@@ -171,6 +167,16 @@ mod platform {
         Ok(devices)
     }
 
+    /// Video and audio are read from separate, independently-cheap sources
+    /// on Linux (`/dev/video*` nodes, `pactl`), so there's no shared probe
+    /// to dedupe here — just run both.
+    pub fn list_capture_devices() -> (Vec<DeviceInfo>, Vec<DeviceInfo>) {
+        (
+            list_webcams().unwrap_or_default(),
+            list_audio_inputs().unwrap_or_default(),
+        )
+    }
+
     pub fn debug_dump() -> String {
         let video_dir = fs::read_dir("/dev")
             .map(|entries| {
@@ -202,28 +208,32 @@ mod platform {
     /// `ffmpeg -f avfoundation -list_devices true -i ""` prints the device
     /// list to stderr and then exits non-zero (no capture was requested).
     fn avfoundation_listing() -> Result<String, String> {
-        let output = Command::new(crate::sidecar::command_name("ffmpeg"))
+        let output = crate::sidecar::command("ffmpeg")
             .args(["-f", "avfoundation", "-list_devices", "true", "-i", ""])
             .output()
             .map_err(|e| format!("failed to run ffmpeg: {e}"))?;
         Ok(String::from_utf8_lossy(&output.stderr).to_string())
     }
 
-    pub fn list_webcams() -> Result<Vec<DeviceInfo>, String> {
-        let text = avfoundation_listing()?;
-        Ok(parse_avfoundation_section(&text, "video devices")
+    /// Both device kinds are printed by the same `-list_devices` probe, so
+    /// run it once and parse both sections out of the one result rather
+    /// than spawning ffmpeg twice.
+    pub fn list_capture_devices() -> (Vec<DeviceInfo>, Vec<DeviceInfo>) {
+        let text = match avfoundation_listing() {
+            Ok(text) => text,
+            Err(_) => return (Vec::new(), Vec::new()),
+        };
+
+        let webcams = parse_avfoundation_section(&text, "video devices")
             .into_iter()
             .filter(|(_, name)| !name.starts_with("Capture screen"))
             .map(|(id, name)| DeviceInfo { id, name })
-            .collect())
-    }
-
-    pub fn list_audio_inputs() -> Result<Vec<DeviceInfo>, String> {
-        let text = avfoundation_listing()?;
-        Ok(parse_avfoundation_section(&text, "audio devices")
+            .collect();
+        let audio_inputs = parse_avfoundation_section(&text, "audio devices")
             .into_iter()
             .map(|(id, name)| DeviceInfo { id, name })
-            .collect())
+            .collect();
+        (webcams, audio_inputs)
     }
 
     /// Parses lines like `[[idx]] Some Device Name` under a
@@ -275,65 +285,83 @@ mod platform {
     /// `ffmpeg -list_devices true -f dshow -i dummy` prints devices to
     /// stderr under two headings, each entry as a quoted name.
     fn dshow_listing() -> Result<String, String> {
-        let output = Command::new(crate::sidecar::command_name("ffmpeg"))
+        let output = crate::sidecar::command("ffmpeg")
             .args(["-list_devices", "true", "-f", "dshow", "-i", "dummy"])
             .output()
             .map_err(|e| format!("failed to run ffmpeg: {e}"))?;
         Ok(String::from_utf8_lossy(&output.stderr).to_string())
     }
 
-    pub fn list_webcams() -> Result<Vec<DeviceInfo>, String> {
-        let text = dshow_listing()?;
-        Ok(parse_dshow_section(&text, "DirectShow video devices")
-            .into_iter()
-            .map(|name| DeviceInfo {
-                id: name.clone(),
-                name,
-            })
-            .collect())
+    /// Both device kinds are printed by the same `-list_devices` probe, so
+    /// run it once and parse both kinds out of the one result rather than
+    /// spawning ffmpeg twice.
+    pub fn list_capture_devices() -> (Vec<DeviceInfo>, Vec<DeviceInfo>) {
+        let text = match dshow_listing() {
+            Ok(text) => text,
+            Err(_) => return (Vec::new(), Vec::new()),
+        };
+        let (video, audio) = parse_dshow_devices(&text);
+        let to_devices = |names: Vec<String>| {
+            names
+                .into_iter()
+                .map(|name| DeviceInfo {
+                    id: name.clone(),
+                    name,
+                })
+                .collect()
+        };
+        (to_devices(video), to_devices(audio))
     }
 
-    pub fn list_audio_inputs() -> Result<Vec<DeviceInfo>, String> {
-        let text = dshow_listing()?;
-        Ok(parse_dshow_section(&text, "DirectShow audio devices")
-            .into_iter()
-            .map(|name| DeviceInfo {
-                id: name.clone(),
-                name,
-            })
-            .collect())
-    }
+    /// Parses ffmpeg's dshow device listing. This comes in two formats
+    /// depending on the ffmpeg build:
+    ///   - Older builds group devices under "DirectShow video devices" /
+    ///     "DirectShow audio devices" headings, with no per-device kind
+    ///     marker.
+    ///   - Newer builds (seen starting around ffmpeg N-126492) drop those
+    ///     headings entirely and instead tag each device inline, e.g.
+    ///     `"Mic Name" (audio)`, printing "Could not enumerate video
+    ///     devices (or none found)." when a kind has no devices.
+    /// The inline `(video)`/`(audio)` tag is preferred when present; the
+    /// heading-based section is used as a fallback for older output that
+    /// has no such tag, so both formats are understood in one pass.
+    fn parse_dshow_devices(text: &str) -> (Vec<String>, Vec<String>) {
+        let mut in_video_section = false;
+        let mut in_audio_section = false;
+        let mut video = Vec::new();
+        let mut audio = Vec::new();
 
-    /// Stays in the section (video or audio) until the *other* section's
-    /// heading appears (or the text ends), skipping any stray line that
-    /// isn't a quoted device name or an "Alternative name" line — rather
-    /// than stopping at the first one, which was too brittle against
-    /// ffmpeg build/version differences in the exact log output.
-    fn parse_dshow_section(text: &str, heading: &str) -> Vec<String> {
-        const HEADINGS: [&str; 2] = ["DirectShow video devices", "DirectShow audio devices"];
-        let mut in_section = false;
-        let mut out = Vec::new();
         for line in text.lines() {
-            if line.contains(heading) {
-                in_section = true;
+            if line.contains("DirectShow video devices") {
+                in_video_section = true;
+                in_audio_section = false;
                 continue;
             }
-            if !in_section {
+            if line.contains("DirectShow audio devices") {
+                in_audio_section = true;
+                in_video_section = false;
                 continue;
-            }
-            if HEADINGS.iter().any(|h| *h != heading && line.contains(h)) {
-                break;
             }
             if line.contains("Alternative name") {
                 continue;
             }
-            if let Some(start) = line.find('"') {
-                if let Some(end) = line[start + 1..].find('"') {
-                    out.push(line[start + 1..start + 1 + end].to_string());
-                }
+
+            let Some(start) = line.find('"') else { continue };
+            let Some(end) = line[start + 1..].find('"') else { continue };
+            let name = line[start + 1..start + 1 + end].to_string();
+            let rest = &line[start + 1 + end + 1..];
+
+            if rest.contains("(video)") {
+                video.push(name);
+            } else if rest.contains("(audio)") {
+                audio.push(name);
+            } else if in_video_section {
+                video.push(name);
+            } else if in_audio_section {
+                audio.push(name);
             }
         }
-        out
+        (video, audio)
     }
 
     pub fn debug_dump() -> String {

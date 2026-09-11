@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::Command;
 
 /// Resolves the path to a bundled "sidecar" binary (`ffmpeg`/`ffprobe`)
 /// shipped next to the app executable, so end users don't need to install
@@ -30,4 +31,23 @@ pub fn command_name(name: &str) -> String {
     resolve(name)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| name.to_string())
+}
+
+/// A `Command` for one of the sidecar binaries, configured so running it
+/// stays invisible.
+pub fn command(name: &str) -> Command {
+    let mut command = Command::new(command_name(name));
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // A release build has no console of its own, so a console-subsystem
+        // child like ffmpeg would otherwise open one — a black window
+        // flashing over the screen, which for a screen recorder also means
+        // it flashes *into* the recording on every start/pause/resume.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    command
 }

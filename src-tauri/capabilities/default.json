@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window and the area-selector overlay",
-  "windows": ["main", "area-selector"],
+  "description": "Capability for the main window, the area-selector overlay and the floating recorder bar",
+  "windows": ["main", "area-selector", "recorder-bar"],
   "permissions": [
     "core:default",
     "core:window:allow-create",
@@ -10,6 +10,12 @@
     "core:window:allow-set-focus",
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-center",
+    "core:window:allow-start-dragging",
     "opener:default",
     "opener:allow-reveal-item-in-dir",
     "dialog:default",

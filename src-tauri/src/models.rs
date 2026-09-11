@@ -75,8 +75,14 @@ pub struct RecordingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingStatus {
     pub is_recording: bool,
+    pub is_paused: bool,
     pub elapsed_seconds: u64,
     pub output_path: Option<String>,
+    /// Why the recording stopped, when it stopped by itself because ffmpeg
+    /// failed. Set instead of `output_path`, since there's no usable file.
+    pub error: Option<String>,
+    /// Microphone level, 0.0..=1.0, while audio is being recorded.
+    pub audio_level: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +91,16 @@ pub struct RecordingFile {
     pub name: String,
     pub size_bytes: u64,
     pub created_at: String,
+}
+
+/// What the main window hands over when it opens the floating recorder
+/// bar, which drives the recording from that point on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BarSetup {
+    pub config: RecordingConfig,
+    /// Whether the bar should have the user drag out a region first
+    /// ("Area" capture) rather than starting on the whole screen.
+    pub pick_area: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

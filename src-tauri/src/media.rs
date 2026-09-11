@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::process::Command;
 use tauri::Manager;
 
 /// Best-effort metadata + a generated thumbnail for a media file, computed
@@ -36,7 +35,7 @@ pub fn prepare(app: &tauri::AppHandle, path: &str) -> Result<MediaPrepared, Stri
 /// report. Returns `None` (rather than erroring) if ffprobe isn't
 /// available or the output can't be parsed.
 fn probe(path: &str) -> Option<(Option<f64>, Option<u32>, Option<u32>)> {
-    let output = Command::new(crate::sidecar::command_name("ffprobe"))
+    let output = crate::sidecar::command("ffprobe")
         .args([
             "-v",
             "error",
@@ -82,7 +81,7 @@ fn generate_thumbnail(app: &tauri::AppHandle, path: &str) -> Result<String, Stri
         .unwrap_or("thumbnail");
     let out_path: PathBuf = cache_dir.join(format!("{stem}.jpg"));
 
-    let output = Command::new(crate::sidecar::command_name("ffmpeg"))
+    let output = crate::sidecar::command("ffmpeg")
         .args(["-y", "-ss", "1", "-i", path, "-frames:v", "1", "-vf", "scale=320:-1", "-q:v", "4"])
         .arg(&out_path)
         .output()

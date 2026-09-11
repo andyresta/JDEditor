@@ -1,0 +1,1513 @@
+/* =========================================================================
+   editor.css — layout + styling for the editor screen (EditorShell.tsx).
+   Every rule is scoped under .ed-shell so it never leaks into the recorder
+   UI, and so it beats the single-class / element rules in App.css.
+   ========================================================================= */
+
+.ed-shell {
+  /* light theme (default) — green base */
+  --ed-bg: #e9f7ef;
+  /* Content surfaces stay white: the video preview and the text sit on
+     these, and tinting them costs legibility for no visual gain. */
+  --ed-surface: #ffffff;
+  --ed-surface-2: #e6f5ec;
+  --ed-surface-3: #d6eee0;
+  --ed-border: #cae7d6;
+  --ed-border-strong: #aedcc1;
+  --ed-text: #102117;
+  --ed-text-dim: #587264;
+  --ed-text-faint: #87a495;
+  /* Bright enough to read as green at a glance, dark enough that the
+     white label on the Export button stays legible. */
+  --ed-accent: #0fa958;
+  --ed-accent-hover: #0c8f4a;
+  --ed-accent-soft: #d8f7e5;
+  --ed-dark: #14251c;
+  --ed-dark-hover: #27412f;
+  --ed-on-dark: #ffffff;
+  --ed-track-empty: #dcf0e4;
+  --ed-shadow-sm: 0 1px 2px rgba(6, 40, 22, 0.07);
+  --ed-shadow-md: 0 6px 18px rgba(6, 40, 22, 0.12);
+  --ed-checker-a: #e2f1e8;
+  --ed-checker-b: #f1faf5;
+  /* Left red: it marks the playhead, and it has to stand out against
+     everything green around it. */
+  --ed-playhead: #ef4444;
+
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  background: var(--ed-bg);
+  color: var(--ed-text);
+  font-size: 13.5px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  .ed-shell {
+    --ed-bg: #0e1712;
+    --ed-surface: #15211a;
+    --ed-surface-2: #1b2a22;
+    --ed-surface-3: #23352a;
+    --ed-border: #2a3e33;
+    --ed-border-strong: #395143;
+    --ed-text: #edf7f1;
+    --ed-text-dim: #9ab4a6;
+    --ed-text-faint: #6d897a;
+    --ed-accent: #2bd873;
+    --ed-accent-hover: #4bea8c;
+    --ed-accent-soft: #113222;
+    --ed-dark: #edf7f1;
+    --ed-dark-hover: #d6e6dc;
+    --ed-on-dark: #0f1a14;
+    --ed-track-empty: #1c2a22;
+    --ed-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --ed-shadow-md: 0 8px 22px rgba(0, 0, 0, 0.45);
+    --ed-checker-a: #141d17;
+    --ed-checker-b: #1a241e;
+    --ed-playhead: #f87171;
+  }
+}
+
+/* --------------------------------------------------------- shared atoms */
+
+.ed-shell *,
+.ed-shell *::before,
+.ed-shell *::after {
+  box-sizing: border-box;
+}
+
+.ed-shell .ed-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: block;
+}
+
+.ed-shell .ed-caret {
+  width: 12px;
+  height: 12px;
+  opacity: 0.6;
+}
+
+.ed-shell .ed-muted {
+  color: var(--ed-text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ed-shell .ed-spacer {
+  flex: 1;
+  min-width: 8px;
+}
+
+.ed-shell .ed-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--ed-border);
+  flex: none;
+}
+
+/* Neutralise the global button rules from App.css. */
+.ed-shell button {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ed-text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background-color 0.12s ease, border-color 0.12s ease,
+    color 0.12s ease;
+}
+
+.ed-shell button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+/* Disabled controls keep the resting look — a hover highlight on something
+   that cannot be pressed reads as a dead click. */
+.ed-shell .ed-iconbtn:disabled:hover {
+  background: transparent;
+  color: var(--ed-text-dim);
+}
+
+.ed-shell .ed-playbtn:disabled:hover {
+  background: var(--ed-dark);
+}
+
+.ed-shell .ed-iconbtn {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ed-text-dim);
+  border-radius: 8px;
+}
+
+.ed-shell .ed-iconbtn:hover {
+  background: var(--ed-surface-2);
+  color: var(--ed-text);
+  border-color: transparent;
+}
+
+.ed-shell .ed-iconbtn-sm {
+  width: 26px;
+  height: 26px;
+}
+
+.ed-shell .ed-iconbtn-sm .ed-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ed-shell .ed-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+  color: var(--ed-text);
+  white-space: nowrap;
+  box-shadow: var(--ed-shadow-sm);
+}
+
+.ed-shell .ed-pill:hover {
+  background: var(--ed-surface-2);
+  border-color: var(--ed-border-strong);
+}
+
+.ed-shell .ed-pill-primary,
+.ed-shell .ed-pill-primary:hover {
+  background: var(--ed-accent);
+  border-color: transparent;
+  color: #ffffff;
+}
+
+.ed-shell .ed-pill-primary:hover {
+  background: var(--ed-accent-hover);
+}
+
+.ed-shell .ed-chipbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+  color: var(--ed-text);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.ed-shell .ed-chipbtn:hover {
+  background: var(--ed-surface-2);
+  border-color: var(--ed-border-strong);
+}
+
+.ed-shell .ed-chipbtn .ed-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--ed-text-dim);
+}
+
+/* -------------------------------------------------------------- top bar */
+
+.ed-shell .ed-topbar {
+  flex: none;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  background: var(--ed-surface);
+  border-bottom: 1px solid var(--ed-border);
+  min-width: 0;
+}
+
+.ed-shell .ed-topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* MenuBar (shared component) restyled as ghost pill dropdowns. */
+.ed-shell .menu-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  flex: none;
+}
+
+.ed-shell .menu-bar-trigger {
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ed-text-dim);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.ed-shell .menu-bar-trigger:hover {
+  background: var(--ed-surface-2);
+  color: var(--ed-text);
+  border-color: var(--ed-border);
+}
+
+.ed-shell .menu-bar-trigger.active {
+  background: var(--ed-surface-2);
+  color: var(--ed-text);
+  border-color: var(--ed-border-strong);
+}
+
+.ed-shell .menu-dropdown {
+  margin-top: 6px;
+  background: var(--ed-surface);
+  border: 1px solid var(--ed-border);
+  border-radius: 10px;
+  box-shadow: var(--ed-shadow-md);
+  padding: 5px;
+  min-width: 13rem;
+  z-index: 40;
+}
+
+.ed-shell .menu-dropdown-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ed-text);
+  font-size: 12.5px;
+  font-weight: 450;
+  text-align: left;
+}
+
+.ed-shell .menu-dropdown-item:hover:not(:disabled) {
+  background: var(--ed-accent);
+  border-color: transparent;
+  color: #ffffff;
+}
+
+.ed-shell .menu-dropdown-item:hover:not(:disabled) .menu-shortcut {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.ed-shell .menu-shortcut {
+  color: var(--ed-text-faint);
+  font-size: 11.5px;
+}
+
+.ed-shell .menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--ed-border);
+}
+
+/* ----------------------------------------------------------- middle row */
+
+.ed-shell .ed-middle {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  min-width: 0;
+}
+
+.ed-shell .ed-stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--ed-bg);
+}
+
+.ed-shell .ed-stage-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  min-width: 0;
+}
+
+.ed-shell .ed-stage-toolbar-left,
+.ed-shell .ed-stage-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* preview canvas */
+.ed-shell .ed-canvas {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  margin: 0 12px;
+  border: 1px solid var(--ed-border);
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  background-color: var(--ed-checker-b);
+  background-image:
+    linear-gradient(45deg, var(--ed-checker-a) 25%, transparent 25% 75%, var(--ed-checker-a) 75%),
+    linear-gradient(45deg, var(--ed-checker-a) 25%, transparent 25% 75%, var(--ed-checker-a) 75%);
+  background-position: 0 0, 8px 8px;
+  background-size: 16px 16px;
+}
+
+.ed-shell .ed-backdrop {
+  /* Definite size so the video's max-width/height percentages resolve and
+     the stage flexes instead of overflowing. */
+  height: 100%;
+  aspect-ratio: 16 / 9;
+  max-width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--ed-pad, 32px);
+  border-radius: 14px;
+  background-image: var(--ed-backdrop, none);
+  background-size: cover;
+  background-position: center;
+  box-shadow: var(--ed-shadow-md);
+  overflow: hidden;
+  transition: padding 0.08s linear;
+}
+
+.ed-shell .ed-backdrop.is-empty {
+  padding: 20px;
+  background-image: none;
+  box-shadow: none;
+}
+
+/* A still gets the same frame treatment as a clip — the backdrop, padding
+   and corner radius are what the preview is for. */
+.ed-shell .ed-video,
+.ed-shell .ed-still {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--ed-radius, 12px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.ed-shell .ed-video {
+  background: #000;
+  cursor: pointer;
+}
+
+/* No black fill: a PNG with transparency should show the backdrop it sits
+   on rather than a box. */
+.ed-shell .ed-still {
+  background: transparent;
+}
+
+/* -------------------------------------------------------- audio on stage */
+
+.ed-shell .ed-audio-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 420px;
+  padding: 26px 24px;
+  border-radius: 14px;
+  background: var(--ed-surface);
+  border: 1px solid var(--ed-border);
+  box-shadow: var(--ed-shadow-md);
+  text-align: center;
+}
+
+.ed-shell .ed-audio-glyph {
+  width: 30px;
+  height: 30px;
+  color: var(--ed-accent);
+}
+
+.ed-shell .ed-audio-name {
+  margin: 0;
+  max-width: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ed-text);
+  overflow-wrap: anywhere;
+}
+
+.ed-shell .ed-audio-player {
+  width: 100%;
+  height: 34px;
+}
+
+.ed-shell .ed-preview-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  max-width: 100%;
+  max-height: 100%;
+  padding: 24px 28px;
+  border-radius: 12px;
+  background: var(--ed-surface);
+  border: 1px solid var(--ed-border);
+  color: var(--ed-text-dim);
+  text-align: center;
+}
+
+.ed-shell .ed-preview-state p {
+  margin: 0;
+  font-size: 13px;
+}
+
+/* playback strip */
+.ed-shell .ed-playbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px 12px;
+  min-width: 0;
+}
+
+.ed-shell .ed-timecode {
+  flex: 0 0 auto;
+  min-width: 140px;
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+  color: var(--ed-text-dim);
+  white-space: nowrap;
+}
+
+.ed-shell .ed-timecode-sep {
+  opacity: 0.5;
+  padding: 0 1px;
+}
+
+.ed-shell .ed-playbar-center {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ed-shell .ed-playbar-right {
+  flex: 0 0 auto;
+  min-width: 140px;
+}
+
+.ed-shell .ed-playbtn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ed-dark);
+  color: var(--ed-on-dark);
+  border-color: transparent;
+  box-shadow: var(--ed-shadow-sm);
+}
+
+.ed-shell .ed-playbtn:hover {
+  background: var(--ed-dark-hover);
+  border-color: transparent;
+}
+
+.ed-shell .ed-playbtn .ed-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.ed-shell .ed-zoom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------- sliders */
+
+.ed-shell .ed-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ed-shell .ed-range-sm {
+  width: 96px;
+  flex: none;
+}
+
+.ed-shell .ed-range::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--ed-accent) 0 var(--ed-fill, 50%),
+    var(--ed-surface-3) var(--ed-fill, 50%) 100%
+  );
+}
+
+.ed-shell .ed-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -4.5px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 1px solid var(--ed-border-strong);
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.25);
+}
+
+.ed-shell .ed-range::-moz-range-track {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--ed-surface-3);
+}
+
+.ed-shell .ed-range::-moz-range-progress {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--ed-accent);
+}
+
+.ed-shell .ed-range::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 1px solid var(--ed-border-strong);
+}
+
+/* ----------------------------------------------------------- inspector */
+
+.ed-shell .ed-inspector {
+  flex: none;
+  width: 300px;
+  min-width: 300px;
+  display: flex;
+  flex-direction: column;
+  background: var(--ed-surface);
+  border-left: 1px solid var(--ed-border);
+  overflow: hidden;
+}
+
+.ed-shell .ed-tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--ed-border);
+}
+
+/* Three labelled tabs across 300px: 12px type and tight padding keeps
+   "Background" on one line. */
+.ed-shell .ed-tab {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--ed-text-faint);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  letter-spacing: -0.1px;
+}
+
+.ed-shell .ed-tab:hover {
+  background: var(--ed-surface-2);
+  color: var(--ed-text);
+  border-color: transparent;
+}
+
+.ed-shell .ed-tab.is-active {
+  background: var(--ed-accent-soft);
+  color: var(--ed-accent);
+  border-color: transparent;
+}
+
+.ed-shell .ed-inspector-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px 14px 20px;
+}
+
+.ed-shell .ed-section-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ed-text);
+}
+
+.ed-shell .ed-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  min-width: 0;
+}
+
+.ed-shell .ed-section-head .ed-section-title {
+  margin: 0;
+}
+
+/* ------------------------------------------- project line + media lists */
+
+/* The open project's name lives here now rather than in the top bar. */
+.ed-shell .ed-projectline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  margin: 0 0 14px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--ed-border);
+}
+
+.ed-shell .ed-project-icon {
+  color: var(--ed-text-dim);
+}
+
+.ed-shell .ed-project-name {
+  min-width: 0;
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ed-shell .ed-dirty {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ed-accent);
+}
+
+.ed-shell .ed-medialist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Draggable onto a track, which is the only way media gets onto the
+   timeline — hence the grab cursor on the row itself. */
+.ed-shell .ed-mediarow {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  border-radius: 9px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+  overflow: hidden;
+  cursor: grab;
+}
+
+.ed-shell .ed-mediarow:active {
+  cursor: grabbing;
+}
+
+.ed-shell .ed-mediarow:hover {
+  border-color: var(--ed-border-strong);
+  background: var(--ed-surface-2);
+}
+
+.ed-shell .ed-mediarow.is-active {
+  border-color: var(--ed-accent);
+  background: var(--ed-accent-soft);
+}
+
+.ed-shell .ed-mediarow-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 4px 7px 7px;
+  border-radius: 0;
+  border-color: transparent;
+  background: transparent;
+  text-align: left;
+}
+
+.ed-shell .ed-mediarow-main:hover {
+  background: transparent;
+  border-color: transparent;
+}
+
+.ed-shell .ed-mediarow-thumb {
+  flex: none;
+  width: 44px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: var(--ed-surface-3);
+  color: var(--ed-text-dim);
+  overflow: hidden;
+}
+
+.ed-shell .ed-mediarow-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ed-shell .ed-mediarow-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ed-shell .ed-mediarow-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ed-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ed-shell .ed-mediarow-meta {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ed-text-faint);
+  white-space: nowrap;
+}
+
+.ed-shell .ed-mediarow-remove {
+  flex: none;
+  width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--ed-text-faint);
+}
+
+.ed-shell .ed-mediarow-remove .ed-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.ed-shell .ed-mediarow-remove:hover {
+  background: var(--ed-surface-3);
+  border-color: transparent;
+  color: var(--ed-text);
+}
+
+.ed-shell .ed-medialist-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 22px 14px;
+  border-radius: 10px;
+  border: 1px dashed var(--ed-border-strong);
+  background: var(--ed-surface-2);
+  text-align: center;
+}
+
+.ed-shell .ed-medialist-empty p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ed-text-dim);
+}
+
+.ed-shell .ed-kind-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.ed-shell .ed-kind {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 7px;
+  border-radius: 8px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+  color: var(--ed-text-dim);
+  font-size: 11.5px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ed-shell .ed-kind:hover {
+  background: var(--ed-surface-2);
+  border-color: var(--ed-border-strong);
+  color: var(--ed-text);
+}
+
+.ed-shell .ed-kind-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--ed-border-strong);
+}
+
+.ed-shell .ed-kind.is-active {
+  background: var(--ed-accent-soft);
+  border-color: var(--ed-accent);
+  color: var(--ed-accent);
+  font-weight: 600;
+}
+
+.ed-shell .ed-kind.is-active .ed-kind-dot {
+  background: var(--ed-accent);
+}
+
+.ed-shell .ed-cat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-bottom: 12px;
+  min-width: 0;
+}
+
+.ed-shell .ed-cat {
+  flex: 0 0 auto;
+  height: 23px;
+  padding: 0 6px;
+  white-space: nowrap;
+  border-radius: 999px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface-2);
+  color: var(--ed-text-dim);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: -0.1px;
+}
+
+.ed-shell .ed-cat:hover {
+  border-color: var(--ed-border-strong);
+  color: var(--ed-text);
+}
+
+.ed-shell .ed-cat.is-active {
+  background: var(--ed-dark);
+  color: var(--ed-on-dark);
+  border-color: transparent;
+}
+
+.ed-shell .ed-swatches {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.ed-shell .ed-swatch {
+  height: 44px;
+  border-radius: 8px;
+  border: 1px solid var(--ed-border);
+  background-size: cover;
+  background-position: center;
+  box-shadow: var(--ed-shadow-sm);
+}
+
+.ed-shell .ed-swatch:hover {
+  border-color: var(--ed-border-strong);
+}
+
+.ed-shell .ed-swatch.is-active {
+  border-color: var(--ed-accent);
+  box-shadow: 0 0 0 2px var(--ed-accent);
+}
+
+.ed-shell .ed-field {
+  margin-bottom: 16px;
+}
+
+.ed-shell .ed-field-label {
+  display: block;
+  margin-bottom: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ed-text-dim);
+}
+
+.ed-shell .ed-note {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--ed-text-faint);
+}
+
+/* ------------------------------------------------------------ timeline */
+
+.ed-shell .ed-timeline {
+  flex: none;
+  height: 150px;
+  display: flex;
+  min-width: 0;
+  background: var(--ed-surface);
+  border-top: 1px solid var(--ed-border);
+
+  /* Width of the track-name column; mirrored by TRACK_LABEL_WIDTH in
+     EditorShell.tsx, which the playhead offset has to skip past. */
+  --ed-side: 110px;
+  /* Height of the ruler row, which the playhead starts below. */
+  --ed-ruler-h: 32px;
+  /* One track lane. Deliberately short so several tracks fit. */
+  --ed-row-h: 37px;
+}
+
+.ed-shell .ed-addtrack {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--ed-accent);
+  color: #ffffff;
+  border-color: transparent;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ed-shell .ed-addtrack:hover {
+  background: var(--ed-accent-hover);
+  border-color: transparent;
+}
+
+.ed-shell .ed-addtrack .ed-icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* One scroll container holds the whole timeline: the track-name column is
+   stuck to its left edge and the ruler to its top, so a name always sits
+   beside its own lane no matter how far the timeline is scrolled, and the
+   rows can grow past the visible height. */
+.ed-shell .ed-timeline-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+/* Deliberately no `min-width: 100%`: zoomed out the timeline is meant to
+   be narrower than the pane it sits in. The width comes from the
+   component: the name column plus the zoomed track width. */
+.ed-shell .ed-timeline-inner {
+  position: relative;
+  padding-bottom: 8px;
+}
+
+/* ruler row: [ add-track button ][ time ruler ] */
+
+.ed-shell .ed-rulerrow {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  align-items: stretch;
+  background: var(--ed-surface);
+}
+
+.ed-shell .ed-rulerrow-side {
+  position: sticky;
+  left: 0;
+  flex: none;
+  width: var(--ed-side);
+  height: var(--ed-ruler-h);
+  display: flex;
+  align-items: center;
+  padding: 0 8px 0 10px;
+  background: var(--ed-surface);
+  border-right: 1px solid var(--ed-border);
+  border-bottom: 1px solid var(--ed-border);
+}
+
+.ed-shell .ed-rulerrow-side .ed-addtrack {
+  width: 100%;
+  height: 24px;
+}
+
+.ed-shell .ed-ruler {
+  position: relative;
+  flex: none;
+  height: var(--ed-ruler-h);
+  border-bottom: 1px solid var(--ed-border);
+}
+
+.ed-shell .ed-tick {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  display: block;
+}
+
+.ed-shell .ed-tick-line {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 8px;
+  background: var(--ed-border-strong);
+}
+
+.ed-shell .ed-tick-label {
+  position: absolute;
+  left: 3px;
+  top: 4px;
+  font-style: normal;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ed-text-faint);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------ tracks and lanes */
+
+/* Row pitch is row height + this gap; TRACK_ROW_PITCH in EditorShell.tsx
+   mirrors it so the playhead can be sized to end exactly at the last
+   track rather than dangling past it. */
+.ed-shell .ed-trackrow {
+  display: flex;
+  align-items: stretch;
+  margin-top: 6px;
+}
+
+/* The name column. Sticky so it stays put while time scrolls past, and
+   opaque with a z-index above the playhead so nothing bleeds under it. */
+.ed-shell .ed-tracklabel {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  flex: none;
+  width: var(--ed-side);
+  height: var(--ed-row-h);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  overflow: hidden;
+  background: var(--ed-surface);
+  border-right: 1px solid var(--ed-border);
+  color: var(--ed-text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.ed-shell .ed-tracklabel .ed-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--ed-text-faint);
+}
+
+.ed-shell .ed-tracklabel-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Only there to hold the column open beside the "no tracks" message. */
+.ed-shell .ed-tracklabel.is-empty {
+  border-right-color: var(--ed-border);
+}
+
+/* Half the height it used to be, to leave room for the extra tracks this
+   timeline is meant to grow into. */
+.ed-shell .ed-lane {
+  position: relative;
+  flex: none;
+  height: var(--ed-row-h);
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--ed-track-empty);
+}
+
+/* A lane being hovered with a clip or a media row. */
+.ed-shell .ed-lane.is-dropping {
+  background: var(--ed-accent-soft);
+  box-shadow: inset 0 0 0 1.5px var(--ed-accent);
+}
+
+/* While something is being dragged the clips stop taking pointer events,
+   so crossing one doesn't fire dragleave on the lane and make the drop
+   indicator flicker. */
+.ed-shell .ed-lane.is-dragging .ed-clip {
+  pointer-events: none;
+}
+
+.ed-shell .ed-lane-hint {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  font-size: 11.5px;
+  color: var(--ed-text-faint);
+  white-space: nowrap;
+}
+
+.ed-shell .ed-lane-none {
+  flex: none;
+  height: var(--ed-row-h);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px dashed var(--ed-border-strong);
+  font-size: 12px;
+  color: var(--ed-text-faint);
+}
+
+/* Where a drop would land, at the width the clip will take. */
+.ed-shell .ed-dropmark {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  padding: 0 5px;
+  overflow: hidden;
+  border-radius: 6px;
+  border: 1.5px dashed var(--ed-accent);
+  background: rgba(15, 169, 88, 0.2);
+  pointer-events: none;
+}
+
+/* The light-theme wash is mixed for a white lane; on the dark theme the
+   same fill would disappear into it. */
+@media (prefers-color-scheme: dark) {
+  .ed-shell .ed-dropmark {
+    background: rgba(43, 216, 115, 0.22);
+  }
+}
+
+.ed-shell .ed-dropmark-time {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--ed-surface);
+  color: var(--ed-accent);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------- clips */
+
+/* Placed by time — left and width come from the clip's own seconds times
+   the current pixels-per-second — rather than by flex share.
+   One row rather than two stacked ones: at half height there isn't room
+   to put the name above the badges. */
+.ed-shell .ed-clip {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  z-index: 1;
+  min-width: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1.5px solid transparent;
+  background: linear-gradient(180deg, #17c267 0%, #0fa958 100%);
+  color: #ffffff;
+  font-family: inherit;
+  text-align: left;
+  cursor: grab;
+  user-select: none;
+}
+
+.ed-shell .ed-clip:active {
+  cursor: grabbing;
+}
+
+.ed-shell .ed-clip:hover {
+  border-color: rgba(255, 255, 255, 0.55);
+}
+
+.ed-shell .ed-clip:focus-visible {
+  outline: none;
+  border-color: #ffffff;
+}
+
+.ed-shell .ed-clip.is-selected {
+  border-color: #ffffff;
+  box-shadow:
+    0 0 0 2px var(--ed-accent),
+    0 3px 10px rgba(0, 0, 0, 0.28);
+}
+
+.ed-shell .ed-clip.is-preparing {
+  background: linear-gradient(180deg, #8ad3aa 0%, #6cb992 100%);
+}
+
+/* CSS-only "waveform" fill. */
+.ed-shell .ed-clip-wave {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.55) 0 2px,
+      transparent 2px 5px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.28) 0 3px,
+      transparent 3px 11px
+    );
+  background-size: 100% 34%, 100% 62%;
+  background-position: center, center;
+  background-repeat: repeat-x;
+  /* Faint enough to read as texture behind the clip's label rather than
+     competing with it. */
+  opacity: 0.45;
+}
+
+.ed-shell .ed-clip-head,
+.ed-shell .ed-clip-badges {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+}
+
+/* A scrim so the name stays readable over the waveform underneath. */
+.ed-shell .ed-clip-head {
+  padding: 1px 6px 1px 4px;
+  border-radius: 5px;
+  background: rgba(6, 40, 22, 0.32);
+}
+
+.ed-shell .ed-clip-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* Stand-in for a clip with no thumbnail yet — stills and audio never get
+   one from ffmpeg. */
+.ed-shell .ed-clip-glyph {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  opacity: 0.9;
+}
+
+.ed-shell .ed-clip-thumb {
+  width: 24px;
+  height: 16px;
+  object-fit: cover;
+  border-radius: 3px;
+  flex: none;
+}
+
+.ed-shell .ed-clip-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.3);
+  color: #ffffff;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Moved with a transform rather than `left`: a percentage offset lands on
+   fractional pixels and re-runs layout every frame, which makes a 2px line
+   shimmer as it slides. A transform is handled by the compositor and
+   stays steady. */
+/* ------------------------------------------------------- add-track row */
+
+/* A ghost row under the last track: same shape as a lane, dashed, so it
+   reads as "another track goes here". */
+.ed-shell .ed-addrow {
+  display: flex;
+  align-items: stretch;
+  margin-top: 6px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.ed-shell .ed-addrow-side {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  flex: none;
+  width: var(--ed-side);
+  background: var(--ed-surface);
+  border-right: 1px solid var(--ed-border);
+}
+
+.ed-shell .ed-addrow-lane {
+  flex: none;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px dashed var(--ed-border-strong);
+  border-radius: 6px;
+  color: var(--ed-text-faint);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.ed-shell .ed-addrow-lane .ed-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.ed-shell .ed-addrow:hover .ed-addrow-lane {
+  background: var(--ed-accent-soft);
+  border-color: var(--ed-accent);
+  color: var(--ed-accent);
+}
+
+/* ------------------------------------------------------------- playhead */
+
+/* Pressing anywhere along the ruler moves playback there. */
+.ed-shell .ed-ruler {
+  cursor: pointer;
+}
+
+.ed-shell .ed-ruler.is-scrubbing,
+.ed-shell .ed-playhead-knob:active {
+  cursor: grabbing;
+}
+
+.ed-shell .ed-playhead {
+  position: absolute;
+  /* Starts under the ruler, which is sticky and paints over everything
+     below it, and at the head of the lanes rather than of the scroller. */
+  top: var(--ed-ruler-h);
+  /* Height is set inline from the number of tracks; letting it run to the
+     bottom of the scroller drew it straight through the add-track row. */
+  bottom: auto;
+  left: var(--ed-side);
+  width: 2px;
+  margin-left: -1px;
+  background: var(--ed-playhead);
+  pointer-events: none;
+  z-index: 3;
+  will-change: transform;
+}
+
+/* The line itself stays click-through, but the knob is the grab handle
+   for scrubbing, so it has to take pointer events back. */
+.ed-shell .ed-playhead-knob {
+  pointer-events: auto;
+  cursor: grab;
+  position: absolute;
+  /* Wholly below the ruler: anything above it would be clipped by the
+     sticky ruler's background. Sits to the right of the line rather than
+     centred on it, because at time zero a centred knob has its left half
+     hidden behind the sticky track-name column. */
+  top: 1px;
+  left: 0;
+  transform: translateX(-1px);
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ed-playhead);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* ---------------------------------------------------------------- toast */
+
+.ed-shell .editor-toast {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: #14251c;
+  color: #ffffff;
+  font-size: 12.5px;
+  font-weight: 500;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
+  z-index: 60;
+  pointer-events: none;
+}
+
+/* -------------------------------------------------------- narrow window */
+
+@media (max-width: 960px) {
+  .ed-shell .ed-timecode,
+  .ed-shell .ed-playbar-right {
+    min-width: 104px;
+  }
+
+  .ed-shell .ed-range-sm {
+    width: 64px;
+  }
+}
