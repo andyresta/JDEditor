@@ -818,7 +818,17 @@ export function EditorShell({
 
     frame = requestAnimationFrame(paint);
     return () => cancelAnimationFrame(frame);
-  }, [isPlaying, timelineSeconds, timeToPixels]);
+  }, [isPlaying, timelineSeconds, timeToPixels, previewClip, clipFrom]);
+
+  // Carrying on into the next clip: once its source is loaded, pick up
+  // where the playhead says and keep playing.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !isPlaying || !previewClip) return;
+    const within = Math.max(0, currentTime - previewClip.startSeconds);
+    if (Math.abs(video.currentTime - within) > 0.3) video.currentTime = within;
+    if (video.paused) void video.play().catch(() => setIsPlaying(false));
+  }, [isPlaying, previewClip, currentTime]);
 
   const nudgeZoom = useCallback(
     (by: number) => {
@@ -830,12 +840,24 @@ export function EditorShell({
   );
 
   function togglePlay() {
+    // Pressing play while the playhead sits in a gap starts from the next
+    // clip along, rather than doing nothing at a point with no picture.
+    if (timelineHasClips && !previewClip) {
+      const next = clipFrom(currentTime) ?? clipFrom(0);
+      if (!next) return;
+      setCurrentTime(next.startSeconds);
+      setIsPlaying(true);
+      return;
+    }
+
     const v = videoRef.current;
     if (!v) {
       setToast(
         media.length === 0
           ? "Import a clip first, then press play."
-          : "Select a ready clip to play it.",
+          : timelineHasClips
+            ? "Drag a clip onto a track to play it."
+            : "Select a ready clip to play it.",
       );
       return;
     }
@@ -1090,8 +1112,8 @@ export function EditorShell({
 
   /** The gradient and padding only make sense behind a picture frame. */
   const framed =
-    activeMedia != null &&
-    (activeMedia.status === "preparing" || activeMedia.kind !== "audio");
+    previewMedia != null &&
+    (previewMedia.status === "preparing" || previewMedia.kind !== "audio");
 
   return (
     <div className="ed-shell">
@@ -1178,12 +1200,14 @@ export function EditorShell({
               className={`ed-backdrop ${framed ? "" : "is-empty"}`}
               style={stageStyle}
             >
-              {activeMedia == null ? (
+              {previewMedia == null ? (
                 <div className="ed-preview-state">
                   <p>
                     {media.length === 0
                       ? "Import media to get started."
-                      : "Select a clip in the Media panel to preview it."}
+                      : timelineHasClips
+                        ? "Nothing on the timeline at this point — move the playhead onto a clip."
+                        : "Select a clip in the Media panel to preview it."}
                   </p>
                   {media.length === 0 && (
                     <button
@@ -1195,17 +1219,17 @@ export function EditorShell({
                     </button>
                   )}
                 </div>
-              ) : activeMedia.status === "preparing" ? (
+              ) : previewMedia.status === "preparing" ? (
                 <div className="ed-preview-state">
                   <span className="spinner spinner-lg" />
-                  <p>Preparing {kindLabel(activeMedia.kind).toLowerCase()} for editing…</p>
+                  <p>Preparing {kindLabel(previewMedia.kind).toLowerCase()} for editing…</p>
                 </div>
-              ) : activeMedia.kind === "video" ? (
+              ) : previewMedia.kind === "video" ? (
                 <video
-                  key={activeMedia.path}
+                  key={previewMedia.path}
                   ref={videoRef}
                   className="ed-video"
-                  src={convertFileSrc(activeMedia.path)}
+                  src={convertFileSrc(previewMedia.path)}
                   onLoadedMetadata={(e) => {
                     const v = e.currentTarget;
                     setVideoDuration(Number.isFinite(v.duration) ? v.duration : 0);
@@ -1237,23 +1261,23 @@ export function EditorShell({
                   }}
                   onClick={togglePlay}
                 />
-              ) : activeMedia.kind === "image" ? (
+              ) : previewMedia.kind === "image" ? (
                 <img
-                  key={activeMedia.path}
+                  key={previewMedia.path}
                   className="ed-still"
-                  src={convertFileSrc(activeMedia.path)}
-                  alt={activeMedia.name}
+                  src={convertFileSrc(previewMedia.path)}
+                  alt={previewMedia.name}
                 />
               ) : (
                 <div className="ed-audio-stage">
                   <Icon name="speaker" className="ed-audio-glyph" />
-                  <p className="ed-audio-name" title={activeMedia.name}>
-                    {activeMedia.name}
+                  <p className="ed-audio-name" title={previewMedia.name}>
+                    {previewMedia.name}
                   </p>
                   <audio
-                    key={activeMedia.path}
+                    key={previewMedia.path}
                     className="ed-audio-player"
-                    src={convertFileSrc(activeMedia.path)}
+                    src={convertFileSrc(previewMedia.path)}
                     controls
                   />
                 </div>
@@ -1287,7 +1311,7 @@ export function EditorShell({
                     ? isPlaying
                       ? "Pause"
                       : "Play"
-                    : activeMedia?.kind === "audio"
+                    : previewMedia?.kind === "audio"
                       ? "Use the player on the stage to hear this track"
                       : "A still image has nothing to play"
                 }
