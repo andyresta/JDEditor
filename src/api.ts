@@ -15,6 +15,7 @@ const MEDIA_FILTERS = [
 
 export const api = {
   checkFfmpeg: () => invoke<boolean>("check_ffmpeg"),
+  debugDeviceScan: () => invoke<string>("debug_device_scan"),
   listDevices: () => invoke<DeviceList>("list_devices"),
   startRecording: (config: RecordingConfig) =>
     invoke<string>("start_recording", { config }),

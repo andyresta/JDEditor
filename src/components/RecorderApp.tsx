@@ -52,6 +52,27 @@ function preparePathAsync(
     });
 }
 
+/** Opens the area-selector overlay and resolves with what the user picked
+ * (or `null` if they pressed Esc to cancel, meaning "entire screen"). */
+function pickArea(): Promise<Rect | null> {
+  return new Promise((resolve, reject) => {
+    let unlisten: (() => void) | undefined;
+    listen<Rect | null>("area-selected", (event) => {
+      unlisten?.();
+      resolve(event.payload);
+    })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(reject);
+
+    api.openAreaSelector().catch((e) => {
+      unlisten?.();
+      reject(e);
+    });
+  });
+}
+
 function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60)
     .toString()
@@ -80,6 +101,10 @@ export function RecorderApp() {
   const [elapsed, setElapsed] = useState(0);
   const [lastOutput, setLastOutput] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<RecordingFile[]>([]);
+
+  const [pickingArea, setPickingArea] = useState(false);
+  const [deviceDebug, setDeviceDebug] = useState<string | null>(null);
+  const [deviceDebugLoading, setDeviceDebugLoading] = useState(false);
 
   const [view, setView] = useState<"launcher" | "recorder" | "editor">("launcher");
   const [projectMedia, setProjectMedia] = useState<MediaItem[]>([]);
@@ -129,14 +154,6 @@ export function RecorderApp() {
       .catch((e) => setError(String(e)));
 
     refreshRecordings();
-
-    const unlistenPromise = listen<Rect | null>("area-selected", (event) => {
-      setArea(event.payload);
-    });
-
-    return () => {
-      unlistenPromise.then((unlisten) => unlisten());
-    };
   }, [refreshRecordings]);
 
   useEffect(() => {
@@ -169,15 +186,6 @@ export function RecorderApp() {
       win.unmaximize().catch(() => {});
     }
   }, [view]);
-
-  async function handleSelectArea() {
-    setError(null);
-    try {
-      await api.openAreaSelector();
-    } catch (e) {
-      setError(String(e));
-    }
-  }
 
   async function handleToggleRecording() {
     setError(null);
@@ -224,10 +232,22 @@ export function RecorderApp() {
       return;
     }
 
+    let pickedArea: Rect | null;
+    setPickingArea(true);
+    try {
+      pickedArea = await pickArea();
+    } catch (e) {
+      setPickingArea(false);
+      setError(String(e));
+      return;
+    }
+    setPickingArea(false);
+    setArea(pickedArea);
+
     try {
       const path = await api.startRecording({
         screen_id: screenId,
-        area,
+        area: pickedArea,
         include_webcam: includeWebcam,
         webcam_id: includeWebcam ? webcamId : null,
         include_audio: includeAudio,
@@ -241,6 +261,17 @@ export function RecorderApp() {
       setElapsed(0);
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function handleShowDeviceDebug() {
+    setDeviceDebugLoading(true);
+    try {
+      setDeviceDebug(await api.debugDeviceScan());
+    } catch (e) {
+      setDeviceDebug(String(e));
+    } finally {
+      setDeviceDebugLoading(false);
     }
   }
 
@@ -378,25 +409,12 @@ export function RecorderApp() {
 
         <div className="field field-row">
           <span>Area</span>
-          <div className="area-controls">
-            <span className="area-summary">
-              {area
-                ? `${area.width} x ${area.height} @ (${area.x}, ${area.y})`
-                : "Entire screen"}
-            </span>
-            <button onClick={handleSelectArea} disabled={isRecording}>
-              Select area
-            </button>
-            {area && (
-              <button
-                className="link-button"
-                onClick={() => setArea(null)}
-                disabled={isRecording}
-              >
-                Reset
-              </button>
-            )}
-          </div>
+          <span className="area-summary">
+            {area
+              ? `Last: ${area.width} x ${area.height} @ (${area.x}, ${area.y})`
+              : "You'll drag-select the area right when you click Start Recording"}
+            {" — press Esc during selection to record the entire screen."}
+          </span>
         </div>
       </section>
 
@@ -458,6 +476,21 @@ export function RecorderApp() {
             )}
           </select>
         </div>
+
+        {devices && (devices.webcams.length === 0 || devices.audio_inputs.length === 0) && (
+          <div className="device-diagnostic">
+            <button
+              className="link-button"
+              onClick={handleShowDeviceDebug}
+              disabled={deviceDebugLoading}
+            >
+              {deviceDebugLoading
+                ? "Scanning…"
+                : "No webcam/audio detected? Show diagnostic info"}
+            </button>
+            {deviceDebug && <pre className="debug-output">{deviceDebug}</pre>}
+          </div>
+        )}
       </section>
 
       <section className="panel">
@@ -498,8 +531,13 @@ export function RecorderApp() {
         <button
           className={`record-button ${isRecording ? "recording" : ""}`}
           onClick={handleToggleRecording}
+          disabled={pickingArea}
         >
-          {isRecording ? `Stop  ${formatElapsed(elapsed)}` : "Start Recording"}
+          {pickingArea
+            ? "Select the area to record…"
+            : isRecording
+              ? `Stop  ${formatElapsed(elapsed)}`
+              : "Start Recording"}
         </button>
         {!isRecording && lastOutput && (
           <p className="last-output">Saved: {lastOutput}</p>

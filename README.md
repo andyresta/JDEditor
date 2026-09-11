@@ -14,7 +14,9 @@ record first, edit later.
 - Screen recording, with a picker for which display to capture
 - Optional webcam overlay (picture-in-picture), with source selection
 - Optional audio recording, with source selection
-- Drag-to-select a custom capture area (or record the entire screen)
+- Clicking **Start Recording** opens the drag-to-select area overlay right
+  away (no separate "select area" step); press **Esc** during selection to
+  record the entire screen instead.
 - Quality presets (Low/Medium/High/Source) and selectable frame rate (24/30/60 fps)
 - A list of past recordings with "show in folder" and delete
 - When a recording finishes (Stop clicked, or the recording ends on its own),
@@ -50,7 +52,11 @@ more reliable across three OSes than a custom capture stack. The Rust side
   pulse/dshow/avfoundation for audio) and manages the ffmpeg child process
   (start/stop/status).
 - `overlay.rs` — opens a transparent, always-on-top window spanning every
-  monitor so the user can drag-select a capture region.
+  monitor so the user can drag-select a capture region. Window creation/
+  closing/focus is dispatched via `AppHandle::run_on_main_thread` — doing
+  this from a command-handler thread instead hung the whole app on
+  Windows (Win32 requires window operations to happen on the thread that
+  created them).
 - `recordings.rs` — lists/deletes finished recordings from the output folder.
 - `media.rs` — asynchronously probes a media file with `ffprobe` (duration,
   resolution) and extracts a thumbnail frame with `ffmpeg`, both best-effort
@@ -141,8 +147,28 @@ work — build on/for each target, e.g. one CI runner per OS).
 - **Windows**: `gdigrab` captures the whole virtual desktop; per-monitor
   "screens" in the picker are really just different regions of that same
   capture.
+- **Webcam/audio not detected**: the Windows (`dshow`) and macOS
+  (`avfoundation`) device lists are parsed from ffmpeg's own log text,
+  which this project couldn't be tested against on real hardware (see
+  below). If nothing shows up, use the "No webcam/audio detected? Show
+  diagnostic info" button next to those dropdowns — it dumps the raw
+  ffmpeg device-listing output, which is the fastest way to fix the parser
+  against your machine's actual output.
 - This app was developed in a headless Linux container with no attached
-  display, camera, or microphone. The Rust code compiles and the ffmpeg
-  command-building logic has been reviewed carefully for each OS, but actual
-  recording has **not** been exercised end-to-end on real hardware for any
-  platform yet — please test on your target OS(es) before relying on it.
+  display, camera, or microphone, and cross-compiling to Windows/macOS
+  isn't fully possible there either (no MSVC linker, no Apple SDK). Given
+  that, verification so far:
+  - **Linux x86_64**: built and cross-checked for real in that
+    environment (including the bundled-ffmpeg sidecar end-to-end) — this
+    is the most-verified platform.
+  - **Windows**: the Rust code was cross-compiled and type-checked for
+    the `x86_64-pc-windows-gnu` target (catching real bugs — see the
+    `run_on_main_thread` fix above), but never actually run on Windows by
+    this project. It has since been run by a real user on Windows, which
+    is how the area-selector hang and empty webcam/audio lists were
+    caught; those fixes are in, but not yet re-confirmed on that machine.
+  - **macOS**: could not be cross-compiled or run at all (would need a
+    real Mac or Apple's SDK) — the `avfoundation` code path is unverified
+    beyond code review.
+  - Please keep reporting what you see (including the diagnostic dump for
+    device-detection issues) — that's the only way to close these gaps.

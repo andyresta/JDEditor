@@ -184,7 +184,8 @@ fn build_screen_input(fps: u32, screen_index: usize, rect: Rect) -> (Vec<String>
 }
 
 #[cfg(target_os = "windows")]
-fn build_screen_input(fps: u32, _screen_index: usize, rect: Rect) -> (Vec<String>, Option<String>) {
+fn build_screen_input(fps: u32, screen_index: usize, rect: Rect) -> (Vec<String>, Option<String>) {
+    let source = devices::screen_grab_source(screen_index);
     let args = vec![
         "-f".into(),
         "gdigrab".into(),
@@ -197,7 +198,7 @@ fn build_screen_input(fps: u32, _screen_index: usize, rect: Rect) -> (Vec<String
         "-video_size".into(),
         format!("{}x{}", rect.width, rect.height),
         "-i".into(),
-        "desktop".into(),
+        source,
     ];
     (args, None)
 }

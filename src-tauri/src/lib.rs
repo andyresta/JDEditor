@@ -21,6 +21,11 @@ fn check_ffmpeg() -> bool {
 }
 
 #[tauri::command]
+fn debug_device_scan() -> String {
+    devices::debug_dump()
+}
+
+#[tauri::command]
 fn start_recording(
     app: tauri::AppHandle,
     state: State<RecorderState>,
@@ -74,6 +79,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_devices,
             check_ffmpeg,
+            debug_device_scan,
             start_recording,
             stop_recording,
             recording_status,

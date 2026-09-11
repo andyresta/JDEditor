@@ -310,6 +310,23 @@ button.danger {
   margin: 0;
 }
 
+.device-diagnostic {
+  margin-top: 0.6rem;
+}
+
+.debug-output {
+  margin-top: 0.5rem;
+  max-height: 12rem;
+  overflow: auto;
+  background: #f4f5f7;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 0.6rem;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Editor shell */
 .editor-shell {
   display: flex;
@@ -737,6 +754,12 @@ button.danger {
 
   .recording-item {
     border-bottom-color: #34363b;
+  }
+
+  .debug-output {
+    background: #1a1b1e;
+    border-color: #34363b;
+    color: #d1d5db;
   }
 
   .banner-error {

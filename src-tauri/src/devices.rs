@@ -95,6 +95,13 @@ pub fn list_all(app: &tauri::AppHandle) -> Result<DeviceList, String> {
     })
 }
 
+/// Raw output from the OS-specific device-listing command, for diagnosing
+/// "no webcams/audio detected" reports without having to guess blindly at
+/// what a user's `ffmpeg -list_devices`/`pactl` output actually looks like.
+pub fn debug_dump() -> String {
+    platform::debug_dump()
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
@@ -163,6 +170,29 @@ mod platform {
         }
         Ok(devices)
     }
+
+    pub fn debug_dump() -> String {
+        let video_dir = fs::read_dir("/dev")
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .filter(|name| name.starts_with("video"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|e| format!("(failed to read /dev: {e})"));
+
+        let pactl_output = Command::new("pactl")
+            .args(["list", "sources"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_else(|e| format!("(failed to run pactl: {e})"));
+
+        format!(
+            "/dev/video* nodes: [{video_dir}]\n\n--- pactl list sources ---\n{pactl_output}"
+        )
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -197,8 +227,12 @@ mod platform {
     }
 
     /// Parses lines like `[[idx]] Some Device Name` under a
-    /// `AVFoundation <section> devices:` heading.
+    /// `AVFoundation <section> devices:` heading. Stays in the section
+    /// until the *other* section's heading appears (or the text ends),
+    /// skipping over any stray non-device lines rather than stopping at
+    /// the first one — ffmpeg builds/log levels aren't perfectly uniform.
     fn parse_avfoundation_section(text: &str, section: &str) -> Vec<(String, String)> {
+        const HEADINGS: [&str; 2] = ["video devices", "audio devices"];
         let mut in_section = false;
         let mut out = Vec::new();
         for line in text.lines() {
@@ -209,22 +243,28 @@ mod platform {
             if !in_section {
                 continue;
             }
+            if HEADINGS.iter().any(|h| *h != section && line.contains(h)) {
+                break;
+            }
             if let Some(start) = line.find('[') {
                 if let Some(bracket_end) = line[start + 1..].find(']') {
                     let idx_str = &line[start + 1..start + 1 + bracket_end];
                     if let Ok(idx) = idx_str.parse::<u32>() {
                         let name = line[start + 1 + bracket_end + 1..].trim().to_string();
                         out.push((idx.to_string(), name));
-                        continue;
                     }
                 }
             }
-            // A line that doesn't match `[idx] name` ends this section.
-            if in_section && !line.contains('[') {
-                break;
-            }
         }
         out
+    }
+
+    pub fn debug_dump() -> String {
+        match avfoundation_listing() {
+            Ok(text) if !text.trim().is_empty() => text,
+            Ok(_) => "ffmpeg ran but produced no output on stderr.".to_string(),
+            Err(e) => format!("Failed to run ffmpeg: {e}"),
+        }
     }
 }
 
@@ -264,7 +304,13 @@ mod platform {
             .collect())
     }
 
+    /// Stays in the section (video or audio) until the *other* section's
+    /// heading appears (or the text ends), skipping any stray line that
+    /// isn't a quoted device name or an "Alternative name" line — rather
+    /// than stopping at the first one, which was too brittle against
+    /// ffmpeg build/version differences in the exact log output.
     fn parse_dshow_section(text: &str, heading: &str) -> Vec<String> {
+        const HEADINGS: [&str; 2] = ["DirectShow video devices", "DirectShow audio devices"];
         let mut in_section = false;
         let mut out = Vec::new();
         for line in text.lines() {
@@ -275,18 +321,26 @@ mod platform {
             if !in_section {
                 continue;
             }
+            if HEADINGS.iter().any(|h| *h != heading && line.contains(h)) {
+                break;
+            }
             if line.contains("Alternative name") {
                 continue;
             }
             if let Some(start) = line.find('"') {
                 if let Some(end) = line[start + 1..].find('"') {
                     out.push(line[start + 1..start + 1 + end].to_string());
-                    continue;
                 }
             }
-            // First non-matching, non-alternative-name line ends this section.
-            break;
         }
         out
+    }
+
+    pub fn debug_dump() -> String {
+        match dshow_listing() {
+            Ok(text) if !text.trim().is_empty() => text,
+            Ok(_) => "ffmpeg ran but produced no output on stderr.".to_string(),
+            Err(e) => format!("Failed to run ffmpeg: {e}"),
+        }
     }
 }
