@@ -56,6 +56,10 @@ more reliable across three OSes than a custom capture stack. The Rust side
   resolution) and extracts a thumbnail frame with `ffmpeg`, both best-effort
   (a missing `ffprobe` or a probe failure degrades gracefully rather than
   blocking playback).
+- `sidecar.rs` — resolves `ffmpeg`/`ffprobe` to the copy bundled next to
+  the app (if `npm run fetch-ffmpeg` was run), falling back to `PATH`
+  otherwise. Every `Command::new("ffmpeg"/"ffprobe")` call goes through
+  this instead of the bare name.
 
 The frontend (`src/`) is a single Vite + React page; `App.tsx` renders either
 the main recorder UI or the area-selector overlay UI, based on which Tauri
@@ -68,20 +72,61 @@ editor view. Media playback in the editor uses Tauri's asset protocol
 
 ## Prerequisites
 
-- **ffmpeg** must be installed and on `PATH`. The app checks for this on
-  startup and shows install instructions if it's missing.
-  - Windows: `winget install ffmpeg`
-  - macOS: `brew install ffmpeg`
-  - Linux: `sudo apt install ffmpeg` (or your distro's package manager)
 - Standard [Tauri prerequisites](https://tauri.app/start/prerequisites/) for
   your OS (Rust toolchain, and on Linux the WebKitGTK/GTK dev packages).
+- **ffmpeg**: see "Bundling ffmpeg" below — either fetch it once so it's
+  bundled into the app, or skip that and just have ffmpeg installed and on
+  `PATH` instead (the app checks for either at startup and shows install
+  instructions if neither is found).
 
 ## Development
 
 ```bash
 npm install
+npm run fetch-ffmpeg   # one-time, see "Bundling ffmpeg" below
 npm run tauri dev
 ```
+
+## Bundling ffmpeg
+
+JDEditor shells out to `ffmpeg`/`ffprobe` for everything (recording,
+metadata, thumbnails). By default it also looks for them bundled right
+next to the app — so once you've fetched them, **end users don't need to
+install ffmpeg separately**.
+
+```bash
+npm run fetch-ffmpeg
+```
+
+This downloads a static `ffmpeg`+`ffprobe` build for **the machine you run
+it on** and places them at `src-tauri/binaries/ffmpeg-<target-triple>` /
+`ffprobe-<target-triple>`, which `tauri.conf.json`'s `bundle.externalBin`
+then copies into every dev/release build automatically. Run it once per
+OS/arch you build for (matching how Tauri cross-platform builds normally
+work — build on/for each target, e.g. one CI runner per OS).
+
+- **Sources**: Windows & Linux builds come from
+  [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) (GitHub
+  releases); macOS from [evermeet.cx](https://evermeet.cx/ffmpeg/) (x86_64
+  only — runs fine on Apple Silicon via Rosetta 2). These were verified
+  working for Linux x86_64 in development (downloaded, extracted, and
+  confirmed `tauri build` copies them next to the compiled binary with
+  zero system ffmpeg installed). The Windows/macOS URLs were checked to
+  respond correctly but **not** run end-to-end — verify on those
+  platforms before shipping.
+- **Size trade-off**: these are full-featured GPL static builds, ~165MB
+  *each* — bundling both adds a few hundred MB to the app. If that's too
+  much, skip `fetch-ffmpeg` and rely on a system-installed ffmpeg instead
+  (the app falls back to `PATH` automatically); or ask for the bundling
+  step to be dropped later.
+- **Licensing**: the bundled ffmpeg/ffprobe are GPL-licensed (built with
+  `libx264`/`libx265`). They're invoked as separate subprocesses — never
+  linked into JDEditor's own binary — which is the standard way apps
+  bundle ffmpeg without the GPL applying to the rest of the codebase. See
+  `THIRD_PARTY_NOTICES.md`.
+- Don't have `ffmpeg`/`ffprobe` bundled or installed? The app shows a
+  screen with manual install instructions (`winget`/`brew`/`apt`) as a
+  fallback.
 
 ## Known limitations / platform notes
 

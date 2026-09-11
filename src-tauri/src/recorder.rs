@@ -80,7 +80,7 @@ pub fn start(
 
     let args = build_ffmpeg_args(&config, &screen, index, &output_path)?;
 
-    let mut child = Command::new("ffmpeg")
+    let mut child = Command::new(crate::sidecar::command_name("ffmpeg"))
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

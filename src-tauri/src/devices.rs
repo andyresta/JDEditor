@@ -2,8 +2,12 @@ use crate::models::{DeviceInfo, DeviceList, ScreenInfo};
 use std::process::Command;
 use tauri::Manager;
 
-/// True if an `ffmpeg` binary can be found on PATH.
+/// Path to the ffmpeg binary to use: the bundled sidecar if one was shipped
+/// with this build, otherwise whatever `ffmpeg` resolves to on PATH.
 pub fn ffmpeg_path() -> Option<String> {
+    if let Some(bundled) = crate::sidecar::resolve("ffmpeg") {
+        return Some(bundled.to_string_lossy().to_string());
+    }
     which::which("ffmpeg")
         .ok()
         .map(|p| p.to_string_lossy().to_string())
@@ -168,7 +172,7 @@ mod platform {
     /// `ffmpeg -f avfoundation -list_devices true -i ""` prints the device
     /// list to stderr and then exits non-zero (no capture was requested).
     fn avfoundation_listing() -> Result<String, String> {
-        let output = Command::new("ffmpeg")
+        let output = Command::new(crate::sidecar::command_name("ffmpeg"))
             .args(["-f", "avfoundation", "-list_devices", "true", "-i", ""])
             .output()
             .map_err(|e| format!("failed to run ffmpeg: {e}"))?;
@@ -231,7 +235,7 @@ mod platform {
     /// `ffmpeg -list_devices true -f dshow -i dummy` prints devices to
     /// stderr under two headings, each entry as a quoted name.
     fn dshow_listing() -> Result<String, String> {
-        let output = Command::new("ffmpeg")
+        let output = Command::new(crate::sidecar::command_name("ffmpeg"))
             .args(["-list_devices", "true", "-f", "dshow", "-i", "dummy"])
             .output()
             .map_err(|e| format!("failed to run ffmpeg: {e}"))?;

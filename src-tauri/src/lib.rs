@@ -4,6 +4,7 @@ mod models;
 mod overlay;
 mod recorder;
 mod recordings;
+mod sidecar;
 
 use models::{DeviceList, Rect, RecordingConfig, RecordingFile, RecordingStatus};
 use recorder::RecorderState;
