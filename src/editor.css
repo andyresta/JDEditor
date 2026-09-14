@@ -33,6 +33,9 @@
   /* Left red: it marks the playhead, and it has to stand out against
      everything green around it. */
   --ed-playhead: #ef4444;
+  /* Blue for sound against the green of picture, so the two are told apart
+     at a glance rather than by reading a name. */
+  --ed-audio: #2563eb;
 
   position: fixed;
   inset: 0;
@@ -70,6 +73,7 @@
     --ed-checker-a: #141d17;
     --ed-checker-b: #1a241e;
     --ed-playhead: #f87171;
+    --ed-audio: #6ea8ff;
   }
 }
 
@@ -401,6 +405,7 @@
   background-position: center;
   box-shadow: var(--ed-shadow-md);
   overflow: hidden;
+  position: relative;
   transition: padding 0.08s linear;
 }
 
@@ -408,6 +413,103 @@
   padding: 20px;
   background-image: none;
   box-shadow: none;
+}
+
+/* The composited picture. Everything playing at this moment is stacked
+   inside this frame, which is the backdrop's padded inside — so a layer's
+   layout, being fractions of it, means the same picture whatever size the
+   window leaves the preview. */
+.ed-shell .ed-stage-frame {
+  position: relative;
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 0;
+}
+
+/* One clip in the stack. Placed by its own layout: `left`/`top` put its
+   centre where the layout says, and the translate takes it back by half
+   its own size so the layout describes the centre rather than the corner. */
+.ed-shell .ed-layer {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-height: 100%;
+}
+
+.ed-shell .ed-layer.is-movable {
+  cursor: grab;
+}
+
+.ed-shell .ed-layer.is-handling {
+  cursor: grabbing;
+}
+
+/* Only the layer that is being worked on wears a frame; the others should
+   look like picture, not like UI. */
+.ed-shell .ed-layer.is-selected::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border: 1.5px solid var(--ed-accent);
+  border-radius: calc(var(--ed-radius, 12px) + 2px);
+  pointer-events: none;
+}
+
+.ed-shell .ed-layer-handle {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  background: #ffffff;
+  border: 1.5px solid var(--ed-accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  z-index: 2;
+}
+
+.ed-shell .ed-layer-handle.is-nw {
+  top: -6px;
+  left: -6px;
+  cursor: nwse-resize;
+}
+.ed-shell .ed-layer-handle.is-ne {
+  top: -6px;
+  right: -6px;
+  cursor: nesw-resize;
+}
+.ed-shell .ed-layer-handle.is-sw {
+  bottom: -6px;
+  left: -6px;
+  cursor: nesw-resize;
+}
+.ed-shell .ed-layer-handle.is-se {
+  bottom: -6px;
+  right: -6px;
+  cursor: nwse-resize;
+}
+
+/* Heard, never seen. */
+.ed-shell .ed-layer-audio {
+  display: none;
+}
+
+.ed-shell .ed-layer-preparing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 20px;
+  border-radius: var(--ed-radius, 12px);
+  background: var(--ed-surface);
+  border: 1px solid var(--ed-border);
+  color: var(--ed-text-dim);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.ed-shell .ed-layer-preparing p {
+  margin: 0;
 }
 
 /* A still gets the same frame treatment as a clip — the backdrop, padding
@@ -422,11 +524,14 @@
   object-fit: contain;
   border-radius: var(--ed-radius, 12px);
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+  /* The layer around it takes the pointer, so a drag can't be swallowed by
+     the media element's own handling. */
+  pointer-events: none;
+  -webkit-user-drag: none;
 }
 
 .ed-shell .ed-video {
   background: #000;
-  cursor: pointer;
 }
 
 /* No black fill: a PNG with transparency should show the backdrop it sits
@@ -500,7 +605,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 14px 12px;
+  padding: 4px 14px 5px;
   min-width: 0;
 }
 
@@ -534,8 +639,8 @@
 }
 
 .ed-shell .ed-playbtn {
-  width: 40px;
-  height: 40px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
@@ -552,8 +657,8 @@
 }
 
 .ed-shell .ed-playbtn .ed-icon {
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
 }
 
 .ed-shell .ed-zoom {
@@ -788,6 +893,10 @@
   border-color: transparent;
 }
 
+.ed-shell .ed-mediarow.is-audio .ed-mediarow-thumb .ed-icon {
+  color: var(--ed-audio);
+}
+
 .ed-shell .ed-mediarow-thumb {
   flex: none;
   width: 44px;
@@ -999,43 +1108,23 @@
 
 .ed-shell .ed-timeline {
   flex: none;
-  height: 150px;
+  /* The room saved on the playback strip goes here: tracks are what this
+     space is for, and splitting audio off adds a row per track. */
+  height: 212px;
   display: flex;
   min-width: 0;
   background: var(--ed-surface);
   border-top: 1px solid var(--ed-border);
 
   /* Width of the track-name column; mirrored by TRACK_LABEL_WIDTH in
-     EditorShell.tsx, which the playhead offset has to skip past. */
-  --ed-side: 110px;
+     EditorShell.tsx, which the playhead offset has to skip past. Wide
+     enough for a track that shows both a picture and a sound icon and
+     still has room for its name. */
+  --ed-side: 132px;
   /* Height of the ruler row, which the playhead starts below. */
   --ed-ruler-h: 32px;
   /* One track lane. Deliberately short so several tracks fit. */
   --ed-row-h: 37px;
-}
-
-.ed-shell .ed-addtrack {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  height: 28px;
-  border-radius: 999px;
-  background: var(--ed-accent);
-  color: #ffffff;
-  border-color: transparent;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.ed-shell .ed-addtrack:hover {
-  background: var(--ed-accent-hover);
-  border-color: transparent;
-}
-
-.ed-shell .ed-addtrack .ed-icon {
-  width: 13px;
-  height: 13px;
 }
 
 /* One scroll container holds the whole timeline: the track-name column is
@@ -1079,11 +1168,6 @@
   background: var(--ed-surface);
   border-right: 1px solid var(--ed-border);
   border-bottom: 1px solid var(--ed-border);
-}
-
-.ed-shell .ed-rulerrow-side .ed-addtrack {
-  width: 100%;
-  height: 24px;
 }
 
 .ed-shell .ed-ruler {
@@ -1143,8 +1227,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 10px;
-  overflow: hidden;
+  padding: 0 8px 0 10px;
   background: var(--ed-surface);
   border-right: 1px solid var(--ed-border);
   color: var(--ed-text-dim);
@@ -1153,9 +1236,80 @@
   white-space: nowrap;
 }
 
+/* The block of track rows, measured so the playhead knows where the last
+   of them ends however tall each has been dragged. */
+.ed-shell .ed-tracks {
+  position: relative;
+}
+
+/* Taller or shorter, one track at a time: the chevron jumps between two
+   heights, the bottom edge drags to anything in between. */
+.ed-shell .ed-trackzoom {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ed-text-faint);
+  opacity: 0;
+}
+
+.ed-shell .ed-tracklabel:hover .ed-trackzoom,
+.ed-shell .ed-trackzoom:focus-visible {
+  opacity: 1;
+}
+
+.ed-shell .ed-trackzoom:hover {
+  background: var(--ed-surface-2);
+  color: var(--ed-text);
+}
+
+.ed-shell .ed-trackzoom .ed-icon {
+  width: 13px;
+  height: 13px;
+  color: inherit;
+}
+
+.ed-shell .ed-flip {
+  transform: rotate(180deg);
+}
+
+.ed-shell .ed-trackgrip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -3px;
+  height: 7px;
+  cursor: ns-resize;
+  z-index: 1;
+}
+
+.ed-shell .ed-trackgrip::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 3px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--ed-accent);
+  opacity: 0;
+}
+
+.ed-shell .ed-tracklabel:hover .ed-trackgrip::after,
+.ed-shell .ed-tracklabel.is-resizing .ed-trackgrip::after {
+  opacity: 1;
+}
+
 .ed-shell .ed-tracklabel .ed-icon {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   color: var(--ed-text-faint);
 }
 
@@ -1181,18 +1335,25 @@
   background: var(--ed-track-empty);
 }
 
+/* Every lane reads as a possible destination while something is in
+   flight, so it is obvious where a clip may be dropped. */
+.ed-shell .ed-lane.is-dragging {
+  box-shadow: inset 0 0 0 1px var(--ed-accent-soft);
+}
+
 /* A lane being hovered with a clip or a media row. */
 .ed-shell .ed-lane.is-dropping {
   background: var(--ed-accent-soft);
   box-shadow: inset 0 0 0 1.5px var(--ed-accent);
 }
 
-/* While something is being dragged the clips stop taking pointer events,
-   so crossing one doesn't fire dragleave on the lane and make the drop
-   indicator flicker. */
-.ed-shell .ed-lane.is-dragging .ed-clip {
-  pointer-events: none;
-}
+/* Deliberately NO `pointer-events: none` on the clips while a drag is in
+   flight. Chromium cancels a drag outright the moment its source element
+   stops being hit-testable: dragstart fired, then dragend, with no
+   dragover and no drop in between — which is exactly why a clip could be
+   picked up but never moved. The dragleave flicker that rule was there to
+   prevent is handled in the lane's own handler instead, by ignoring a
+   dragleave whose relatedTarget is still inside the lane. */
 
 .ed-shell .ed-lane-hint {
   position: absolute;
@@ -1267,7 +1428,10 @@
   display: flex;
   flex-direction: row;
   justify-content: flex-start;
-  align-items: center;
+  /* Along the top rather than down the middle: the middle of a clip is
+     where the volume line's 0 dB runs, and on a track dragged tall the
+     name would otherwise float in the middle of the waveform. */
+  align-items: flex-start;
   gap: 7px;
   padding: 3px 7px;
   border-radius: 6px;
@@ -1304,6 +1468,59 @@
   background: linear-gradient(180deg, #8ad3aa 0%, #6cb992 100%);
 }
 
+/* Sound is blue wherever it appears — a clip on an audio track, and an
+   audio file dropped straight onto a video track — against the green of
+   picture, so a strip of sound is never mistaken for a strip of picture. */
+/* One icon for a track of picture, one for a track of sound, and both for
+   a track carrying each. Tighter than the label's own gap, so the pair
+   reads as one mark rather than two crowding the name. */
+.ed-shell .ed-tracklabel-icons {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* Beats `.ed-tracklabel .ed-icon`'s faint grey, which is otherwise the
+   more specific rule. */
+.ed-shell .ed-tracklabel .ed-icon-audio {
+  color: var(--ed-audio);
+}
+
+.ed-shell .ed-clip.is-audio {
+  background: linear-gradient(180deg, #2f7ae5 0%, #1d5fd1 100%);
+}
+
+/* A picture whose sound has been lifted onto an audio track: the green is
+   drained out of it, so at a glance it reads as a silent strip rather than
+   as a clip that still carries its own audio. */
+.ed-shell .ed-clip.is-split {
+  background: linear-gradient(180deg, #6f9a82 0%, #58806b 100%);
+}
+
+/* Silenced clips step back without disappearing. */
+.ed-shell .ed-clip.is-muted {
+  opacity: 0.55;
+}
+
+/* The real thing: the file's own loudness envelope, drawn on a decibel
+   scale and mirrored about the middle of the clip — which is also where
+   the volume line's 0 dB sits, so the two read as one instrument. */
+.ed-shell .ed-clip-wave-real {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.ed-shell .ed-clip-wave-real polygon {
+  /* Enough to read the shape of the sound, not so much that the clip
+     stops looking like a clip. */
+  fill: rgba(255, 255, 255, 0.38);
+}
+
+/* A stand-in until the envelope has been read off the file. */
 /* CSS-only "waveform" fill. */
 .ed-shell .ed-clip-wave {
   position: absolute;
@@ -1368,6 +1585,107 @@
   object-fit: cover;
   border-radius: 3px;
   flex: none;
+}
+
+/* ------------------------------------------------------- volume line */
+
+/* Covers the clip but takes no pointer itself; only the fat invisible
+   stroke below does, which is what leaves the rest of the clip draggable.
+
+   The width and height are spelled out rather than left to `inset`. An
+   <svg> is a replaced element with an intrinsic aspect ratio, so with
+   `height: auto` it sizes itself from its own viewBox instead of from the
+   box it was told to fill — this one came out 911px tall inside a 90px
+   clip, which drew the whole line far below the clip and clipped it away.
+   The line looked missing and the band that drags it was nowhere near
+   where it appeared to be. */
+.ed-shell .ed-clip-volume {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  pointer-events: none;
+  overflow: visible;
+}
+
+/* The hit band: transparent, a good deal wider than the line it follows,
+   and hit-tested on the stroke alone so it hugs the line's shape instead
+   of claiming a rectangle. */
+.ed-shell .ed-clip-volume-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 16;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  pointer-events: stroke;
+  cursor: ns-resize;
+}
+
+/* Amber, and the only thing on the timeline that colour: a dark line on a
+   green clip with a pale waveform behind it was there but easy to miss,
+   and a control nobody can see is a control nobody can use. The dark halo
+   keeps it legible over the brightest part of a waveform. */
+.ed-shell .ed-clip-volume-line {
+  fill: none;
+  stroke: #ffc83d;
+  stroke-width: 2.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+  filter: drop-shadow(0 0 2px rgba(6, 32, 18, 0.85));
+}
+
+/* Visibly a handle while the pointer is on it. */
+.ed-shell .ed-clip-volume:hover .ed-clip-volume-line {
+  stroke-width: 3.5;
+}
+
+/* The line at 0 dB — the level the clip was recorded at — so it is plain
+   which way is louder and which way is quieter. */
+.ed-shell .ed-clip-volume-zero {
+  fill: none;
+  stroke: rgba(6, 40, 22, 0.35);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.ed-shell .ed-clip-volume-knobs {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.ed-shell .ed-clip-volume-knob {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: #ffc83d;
+  border: 1.5px solid rgba(6, 32, 18, 0.85);
+  box-shadow: 0 1px 3px rgba(6, 40, 22, 0.5);
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.ed-shell .ed-clip-volume-knob:hover {
+  transform: scale(1.2);
+}
+
+.ed-shell .ed-clip-volume-knob:active {
+  cursor: grabbing;
+}
+
+/* "Muted", "Audio split" — a state, not a measurement, so it is set apart
+   from the duration it sits beside. */
+.ed-shell .ed-clip-badge.is-flag {
+  background: rgba(6, 40, 22, 0.5);
+  letter-spacing: 0.02em;
 }
 
 .ed-shell .ed-clip-badge {
@@ -1456,29 +1774,80 @@
   width: 2px;
   margin-left: -1px;
   background: var(--ed-playhead);
+  /* Whole pixels only: a line landing on a half pixel is drawn across two
+     of them at half strength, which reads as a blurred, wandering edge. */
+  transform: translateX(0);
   pointer-events: none;
   z-index: 3;
   will-change: transform;
 }
 
 /* The line itself stays click-through, but the knob is the grab handle
-   for scrubbing, so it has to take pointer events back. */
+   for scrubbing, so it has to take pointer events back.
+
+   Centred on the line, exactly: the line is 2px wide and pulled back 1px,
+   so its middle is at 50% of this element and the knob's own half-width
+   takes it back to sit squarely on top. It used to be nudged sideways by a
+   pixel or two, which is what made the playhead look out of true. */
 .ed-shell .ed-playhead-knob {
   pointer-events: auto;
   cursor: grab;
   position: absolute;
   /* Wholly below the ruler: anything above it would be clipped by the
-     sticky ruler's background. Sits to the right of the line rather than
-     centred on it, because at time zero a centred knob has its left half
-     hidden behind the sticky track-name column. */
-  top: 1px;
-  left: 0;
-  transform: translateX(-1px);
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
+     sticky ruler's background. */
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 10px;
+  height: 10px;
+  /* A drop, flat along the top where it meets the ruler and tapering to a
+     point on the line, so the eye can see exactly which pixel is meant. */
+  border-radius: 2px 2px 50% 50%;
   background: var(--ed-playhead);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* ------------------------------------------------------------ clip menu */
+
+.ed-shell .ed-clipmenu {
+  position: fixed;
+  z-index: 40;
+  min-width: 176px;
+  padding: 5px;
+  border-radius: 10px;
+  background: var(--ed-surface);
+  border: 1px solid var(--ed-border);
+  box-shadow: var(--ed-shadow-md);
+}
+
+.ed-shell .ed-clipmenu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ed-text);
+  font-size: 12.5px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.ed-shell .ed-clipmenu-item .ed-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--ed-text-dim);
+}
+
+.ed-shell .ed-clipmenu-item:hover:not(:disabled) {
+  background: var(--ed-accent-soft);
+  color: var(--ed-text);
+}
+
+.ed-shell .ed-clipmenu-item:disabled {
+  opacity: 0.45;
 }
 
 /* ---------------------------------------------------------------- toast */
@@ -1509,5 +1878,227 @@
 
   .ed-shell .ed-range-sm {
     width: 64px;
+  }
+}
+
+/* ---------------------------------------------------------- trimming */
+
+/* A grab strip at each end of a clip. Above the volume line, which runs
+   the full width of the clip and would otherwise take the press: trimming
+   an edge is the more common gesture by far, and the line can still be
+   reached anywhere between the two. */
+.ed-shell .ed-clip-trim {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 4;
+  cursor: ew-resize;
+}
+
+.ed-shell .ed-clip-trim.is-start {
+  left: 0;
+}
+
+.ed-shell .ed-clip-trim.is-end {
+  right: 0;
+}
+
+/* Nothing to see until the clip is being worked on, then a grip. */
+.ed-shell .ed-clip-trim::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 2px rgba(6, 32, 18, 0.6);
+  opacity: 0;
+  transition: opacity 0.08s linear;
+}
+
+.ed-shell .ed-clip-trim.is-start::after {
+  left: 2px;
+}
+
+.ed-shell .ed-clip-trim.is-end::after {
+  right: 2px;
+}
+
+.ed-shell .ed-clip:hover .ed-clip-trim::after,
+.ed-shell .ed-clip.is-selected .ed-clip-trim::after,
+.ed-shell .ed-clip.is-trimming .ed-clip-trim::after {
+  opacity: 1;
+}
+
+.ed-shell .ed-clip.is-trimming {
+  cursor: ew-resize;
+}
+
+/* A drop that has been pulled onto something — the start of the project,
+   the playhead, or another clip's edge — says so with a bright rule down
+   each side, so it is clear the join will be exact rather than nearly. */
+.ed-shell .ed-dropmark.is-snapped {
+  border-left: 2px solid #ffc83d;
+  border-right: 2px solid #ffc83d;
+  box-shadow:
+    inset 0 0 0 1.5px var(--ed-accent),
+    0 0 8px rgba(255, 200, 61, 0.55);
+}
+
+/* ------------------------------------------------------- zoom points */
+
+/* Marked along the top edge of the clip they belong to, clear of the
+   volume line that runs through its middle. */
+.ed-shell .ed-clip-zooms {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 12px;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.ed-shell .ed-clip-zoom {
+  position: absolute;
+  top: 2px;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  /* A diamond: a shape nothing else on the timeline uses, so a zoom point
+     is never taken for a volume point. */
+  transform: rotate(45deg);
+  border-radius: 1px;
+  background: #ffffff;
+  border: 1.5px solid rgba(6, 32, 18, 0.8);
+  box-shadow: 0 1px 2px rgba(6, 40, 22, 0.45);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.ed-shell .ed-clip-zoom:hover {
+  background: #ffc83d;
+}
+
+/* ------------------------------------------------------------- titles */
+
+/* The title's drawing covers the whole frame; the words are placed inside
+   it. Click-through, because the layer around it takes the pointer. */
+.ed-shell .ed-text-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.ed-shell .ed-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface-2);
+  color: var(--ed-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.ed-shell .ed-textrow {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.ed-shell .ed-textswatch,
+.ed-shell .ed-textcheck {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ed-text-dim);
+}
+
+.ed-shell .ed-textswatch input[type="color"] {
+  width: 34px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--ed-border);
+  border-radius: 6px;
+  background: none;
+}
+
+.ed-shell .ed-textswatch input[type="color"]:disabled {
+  opacity: 0.4;
+}
+
+/* A title on the timeline: not footage, so not the green of one. */
+.ed-shell .ed-clip.is-text {
+  background: linear-gradient(180deg, #8459d6 0%, #6a42b8 100%);
+}
+
+/* -------------------------------------------------------- missing media */
+
+/* A project that cannot find its footage says so where the footage is
+   listed, rather than leaving it to be noticed as a clip playing nothing. */
+.ed-shell .ed-missing {
+  margin-bottom: 14px;
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1px solid #e4b4b4;
+  background: #fdeeee;
+  color: #7e2222;
+}
+
+.ed-shell .ed-missing p {
+  margin: 0 0 9px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.ed-shell .ed-mediarow.is-missing {
+  border-color: #e4b4b4;
+  background: #fdf4f4;
+}
+
+.ed-shell .ed-mediarow.is-missing .ed-mediarow-meta {
+  color: #a33b3b;
+}
+
+.ed-shell .ed-mediarow-find {
+  flex: none;
+  align-self: center;
+  margin-right: 4px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid #d79a9a;
+  background: #ffffff;
+  color: #8c2020;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.ed-shell .ed-mediarow-find:hover {
+  background: #fdeaea;
+}
+
+@media (prefers-color-scheme: dark) {
+  .ed-shell .ed-missing {
+    border-color: #6d3030;
+    background: #2a1717;
+    color: #f3bcbc;
+  }
+  .ed-shell .ed-mediarow.is-missing {
+    border-color: #6d3030;
+    background: #241515;
+  }
+  .ed-shell .ed-mediarow.is-missing .ed-mediarow-meta {
+    color: #e79a9a;
+  }
+  .ed-shell .ed-mediarow-find {
+    border-color: #7a3a3a;
+    background: #351d1d;
+    color: #f3bcbc;
   }
 }

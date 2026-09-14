@@ -1,5 +1,6 @@
 mod bar;
 mod devices;
+mod export;
 mod media;
 mod meter;
 mod models;
@@ -8,6 +9,7 @@ mod project;
 mod recorder;
 mod recordings;
 mod sidecar;
+mod waveform;
 
 use models::{BarSetup, DeviceList, Rect, RecordingConfig, RecordingFile, RecordingStatus};
 use recorder::RecorderState;
@@ -144,6 +146,55 @@ async fn load_project(path: String) -> Result<String, String> {
     blocking(move || project::load(&path)).await?
 }
 
+/// Whether a file is where it is said to be.
+///
+/// A project remembers where its footage was; opening one somewhere else,
+/// or after the files have been tidied into another folder, has to be able
+/// to find out that they have gone rather than discovering it later as a
+/// clip that plays nothing.
+#[tauri::command]
+async fn path_exists(path: String) -> Result<bool, String> {
+    blocking(move || std::path::Path::new(&path).is_file()).await
+}
+
+/// Stores a title's picture where the renderer can reach it.
+///
+/// The editor draws its titles onto a canvas and hands the bytes over;
+/// they are put beside the thumbnails, named after the clip, so a second
+/// export simply replaces the first rather than piling up.
+#[tauri::command]
+async fn write_text_image(
+    app: tauri::AppHandle,
+    clip_id: String,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    blocking(move || export::write_text_image(&app, &clip_id, &bytes)).await?
+}
+
+/// Renders the timeline to a file. Long-running by nature, so it runs off
+/// the UI thread and reports its position through `export-progress`
+/// events rather than by returning anything until it is done.
+#[tauri::command]
+async fn export_timeline(
+    app: tauri::AppHandle,
+    plan: export::ExportPlan,
+) -> Result<String, String> {
+    blocking(move || export::run(&app, plan)).await?
+}
+
+#[tauri::command]
+async fn cancel_export(app: tauri::AppHandle) -> Result<(), String> {
+    blocking(move || export::cancel(&app)).await
+}
+
+/// The loudness envelope of a file's audio, for drawing on the timeline.
+/// Decoding a long file takes a moment, so like `prepare_media` this runs
+/// off the UI thread and the editor draws a flat line until it answers.
+#[tauri::command]
+async fn audio_peaks(path: String) -> Result<waveform::AudioPeaks, String> {
+    blocking(move || waveform::read(&path)).await?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -152,6 +203,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(RecorderState::default())
         .manage(bar::BarState::default())
+        .manage(export::ExportState::default())
         .invoke_handler(tauri::generate_handler![
             list_devices,
             check_ffmpeg,
@@ -173,6 +225,11 @@ pub fn run() {
             prepare_media,
             save_project,
             load_project,
+            audio_peaks,
+            path_exists,
+            write_text_image,
+            export_timeline,
+            cancel_export,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

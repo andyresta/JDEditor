@@ -79,10 +79,11 @@ export interface MediaPrepared {
   duration_seconds: number | null;
   width: number | null;
   height: number | null;
+  frame_rate: number | null;
   thumbnail_path: string | null;
 }
 
-export type MediaStatus = "preparing" | "ready";
+export type MediaStatus = "preparing" | "ready" | "missing";
 
 export type MediaKind = "video" | "image" | "audio";
 
@@ -94,6 +95,8 @@ export interface MediaItem {
   durationSeconds?: number | null;
   width?: number | null;
   height?: number | null;
+  /** Frames a second, when the file admitted to one. */
+  frameRate?: number | null;
   thumbnailPath?: string | null;
 }
 
@@ -167,12 +170,635 @@ export interface TimelineClip {
   /** Where the clip begins, in seconds from the start of the timeline. */
   startSeconds: number;
   durationSeconds: number;
+  /** How far into its own file the clip starts playing. Zero — and so
+   * usually absent — until the clip has been cut: the second half of a cut
+   * begins partway through the same file. */
+  trimStartSeconds?: number;
+  /** Where this clip sits inside the preview frame. Absent until it has
+   * been moved or resized, so a clip that has never been touched follows
+   * whatever its track's default is. */
+  layout?: ClipLayout;
+  /** A framing that changes over the course of the clip: zooming into a
+   * corner of the screen at one moment and back out at another. Absent
+   * while the clip holds still, in which case `layout` is the whole story.
+   * Times are the clip's own, so trimming carries them along. */
+  layoutPoints?: LayoutPoint[];
+  /** Words rather than footage. A clip with this is a title: it has no
+   * file behind it, so `mediaPath` is empty and everything that looks up
+   * media has to let it pass. */
+  text?: TextStyle;
+  /** Silenced by hand, from the clip's own menu. */
+  muted?: boolean;
+  /** The clip's volume line, sorted by time. Absent — or empty — means a
+   * flat line at full volume. One point is an overall level; two or more
+   * make an envelope that ramps between them. */
+  volume?: VolumePoint[];
+  /** Its sound has been split onto the paired audio track, so the picture
+   * itself plays silent and the volume is edited on that track instead. */
+  audioDetached?: boolean;
+  /** This clip is here to be heard, not seen — the half that Split Audio
+   * lifts off a video. It stays sound-only wherever it is moved to, which
+   * is what tells it apart from a video clip that simply happens to have
+   * been dropped on an audio track. */
+  soundOnly?: boolean;
 }
+
+/** A clip's place in the preview frame, so clips on higher tracks can be
+ * laid over the ones below — the picture-in-picture arrangement every
+ * editor has.
+ *
+ * `x` and `y` are the offset of the layer's centre from the frame's
+ * centre, and `scale` is its width, all as fractions of the frame rather
+ * than pixels: the preview is whatever size the window leaves it, and a
+ * layout written in pixels would mean something different every time the
+ * window was resized. */
+export interface ClipLayout {
+  x: number;
+  y: number;
+  scale: number;
+}
+
+/** Every clip fills the frame until it is moved or resized, whichever
+ * track it sits on.
+ *
+ * Upper tracks used to start as a corner inset so that stacking would be
+ * obvious at a glance, but that was wrong: a clip on the second track with
+ * nothing underneath it showed as a thumbnail in the corner of an empty
+ * stage, which reads as the preview having failed to find it. A track is a
+ * layer, and a layer covers the ones below — shrinking one into a
+ * picture-in-picture is for the corner handles to do, on request. */
+export const FULL_FRAME_LAYOUT: ClipLayout = { x: 0, y: 0, scale: 1 };
+
+/** A title's words and how they look. Sizes are fractions of the frame's
+ * height rather than pixels, so the same title reads the same whether it
+ * is previewed in a small window or rendered at 1080p. */
+export interface TextStyle {
+  content: string;
+  /** Line height as a fraction of the frame's height. */
+  size: number;
+  color: string;
+  /** A panel behind the words, or nothing. */
+  background: string | null;
+  bold: boolean;
+}
+
+export const DEFAULT_TEXT_STYLE: TextStyle = {
+  content: "Your title",
+  size: 0.09,
+  color: "#ffffff",
+  background: "#0b2016",
+  bold: true,
+};
+
+export const DEFAULT_TEXT_SECONDS = 5;
+
+export function isTextClip(clip: TimelineClip): boolean {
+  return clip.text != null;
+}
+
+/** One framing, held at a moment in a clip. Between two of them the
+ * picture travels from the first to the second. */
+export interface LayoutPoint {
+  at: number;
+  layout: ClipLayout;
+}
+
+/** How far a zoom may be pushed. Past this a screen recording is a few
+ * enormous pixels and nothing more. */
+export const MAX_ZOOM = 6;
+
+/** The framing a list of points describes at a moment: held before the
+ * first and after the last, and easing between them, so a zoom starts and
+ * stops gently rather than lurching. */
+export function layoutAtPoints(
+  points: LayoutPoint[] | undefined,
+  seconds: number,
+  resting: ClipLayout,
+): ClipLayout {
+  if (!points || points.length === 0) return resting;
+  if (points.length === 1) return points[0].layout;
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (seconds <= first.at) return first.layout;
+  if (seconds >= last.at) return last.layout;
+
+  for (let i = 1; i < points.length; i += 1) {
+    const from = points[i - 1];
+    const to = points[i];
+    if (seconds > to.at) continue;
+    const span = to.at - from.at;
+    if (span <= 0) return to.layout;
+    const eased = smoothstep((seconds - from.at) / span);
+    return {
+      x: from.layout.x + eased * (to.layout.x - from.layout.x),
+      y: from.layout.y + eased * (to.layout.y - from.layout.y),
+      scale: from.layout.scale + eased * (to.layout.scale - from.layout.scale),
+    };
+  }
+  return last.layout;
+}
+
+export function layoutAt(clip: TimelineClip, seconds: number): ClipLayout {
+  return layoutAtPoints(clip.layoutPoints, seconds, clip.layout ?? FULL_FRAME_LAYOUT);
+}
+
+/** Holds a framing at a moment in a clip, replacing whatever was held
+ * there before. */
+export function setLayoutAt(
+  clip: TimelineClip,
+  seconds: number,
+  layout: ClipLayout,
+): TimelineClip {
+  const at = toMillis(Math.max(0, Math.min(clip.durationSeconds, seconds)));
+  const existing = clip.layoutPoints ?? [];
+
+  if (existing.length === 0) {
+    const resting = clip.layout ?? FULL_FRAME_LAYOUT;
+    // The first point on a clip that has only ever held still also gets
+    // one at the very beginning, holding what it looked like until now —
+    // otherwise a zoom added halfway through would apply to the whole clip
+    // rather than being somewhere it travels to.
+    return {
+      ...clip,
+      layoutPoints:
+        at > 0.001
+          ? [{ at: 0, layout: resting }, { at, layout }]
+          : [{ at: 0, layout }],
+    };
+  }
+
+  return {
+    ...clip,
+    layoutPoints: [
+      ...existing.filter((point) => Math.abs(point.at - at) > 0.001),
+      { at, layout },
+    ].sort((a, b) => a.at - b.at),
+  };
+}
+
+/** Takes a framing away. The last one left is no longer a journey, so it
+ * becomes the clip's resting framing again. */
+export function removeLayoutAt(clip: TimelineClip, seconds: number): TimelineClip {
+  const points = (clip.layoutPoints ?? []).filter(
+    (point) => Math.abs(point.at - seconds) > 0.001,
+  );
+  if (points.length <= 1) {
+    return {
+      ...clip,
+      layoutPoints: undefined,
+      layout: points[0]?.layout ?? clip.layout,
+    };
+  }
+  return { ...clip, layoutPoints: points };
+}
+
+/** The stretch of a zoom between two moments in a clip, rebased to start
+ * at zero — the same journey the volume line takes when an edge moves. */
+export function sliceLayout(
+  points: LayoutPoint[] | undefined,
+  from: number,
+  to: number,
+  resting: ClipLayout,
+): LayoutPoint[] | undefined {
+  if (!points || points.length === 0 || to <= from) return undefined;
+  if (points.length === 1) return points;
+
+  const inside = points
+    .filter((point) => point.at > from + 1e-6 && point.at < to - 1e-6)
+    .map((point) => ({ at: toMillis(point.at - from), layout: point.layout }));
+
+  return [
+    { at: 0, layout: layoutAtPoints(points, from, resting) },
+    ...inside,
+    { at: toMillis(to - from), layout: layoutAtPoints(points, to, resting) },
+  ];
+}
+
+/** Video tracks carry the picture and, unless it has been split off, its
+ * sound. An audio track carries only sound, split from the video track it
+ * is paired with. */
+export type TrackKind = "video" | "audio";
 
 export interface TimelineTrack {
   id: string;
   name: string;
   clips: TimelineClip[];
+  /** Absent on projects saved before audio tracks existed — everything in
+   * those was a video track. */
+  kind?: TrackKind;
+  /** For an audio track, the video track whose sound it holds. */
+  sourceTrackId?: string;
+  /** Row height in pixels, when it has been dragged taller than the rest.
+   * Absent means the default. */
+  height?: number;
+}
+
+/** Row heights. The default is deliberately short so several tracks fit;
+ * one track at a time can be pulled taller to work on it closely. */
+export const TRACK_HEIGHT = 37;
+export const TRACK_HEIGHT_MIN = 28;
+export const TRACK_HEIGHT_MAX = 180;
+/** What the expand control jumps to, and back from. */
+export const TRACK_HEIGHT_TALL = 96;
+
+export function trackHeightOf(track: TimelineTrack): number {
+  return track.height ?? TRACK_HEIGHT;
+}
+
+/** A point on a clip's volume line: how loud, and when. `at` is measured
+ * from the clip's own start rather than the project's, so moving a clip
+ * along the timeline carries its volume line with it.
+ *
+ * `gain` is a straight multiplier, where 1 is the sound as recorded. It
+ * can go above 1: raising a clip is done with a gain stage rather than the
+ * media element's own volume, which stops at 1. */
+export interface VolumePoint {
+  at: number;
+  gain: number;
+}
+
+/** How far the line reaches above and below the recorded level. Decibels,
+ * not multipliers, because that is how loudness is heard and how every
+ * other editor labels it: halfway up the line is 0 dB either way. */
+export const MAX_BOOST_DB = 12;
+export const MIN_GAIN_DB = -48;
+export const MAX_GAIN = 10 ** (MAX_BOOST_DB / 20);
+
+/** Where a gain sits on the line: 0 at the bottom, 1 at the top, and 0 dB
+ * — the sound exactly as recorded — squarely in the middle, so a point has
+ * somewhere to go in both directions. */
+export function positionForGain(gain: number): number {
+  if (gain <= 0) return 0;
+  const db = 20 * Math.log10(gain);
+  if (db >= 0) return 0.5 + Math.min(db / MAX_BOOST_DB, 1) * 0.5;
+  return 0.5 - Math.min(db / MIN_GAIN_DB, 1) * 0.5;
+}
+
+/** The reverse: what a place on the line is worth. */
+export function gainForPosition(position: number): number {
+  const at = Math.max(0, Math.min(1, position));
+  // The bottom of the line is silence rather than merely very quiet, so
+  // that dragging a point all the way down does what it looks like.
+  if (at <= 0.005) return 0;
+  const db =
+    at >= 0.5
+      ? ((at - 0.5) / 0.5) * MAX_BOOST_DB
+      : ((0.5 - at) / 0.5) * MIN_GAIN_DB;
+  return 10 ** (db / 20);
+}
+
+/** A gain as it is written on screen. */
+export function formatGainDb(gain: number): string {
+  if (gain <= 0) return "−∞ dB";
+  const db = 20 * Math.log10(gain);
+  if (db > -0.05 && db < 0.05) return "0.0 dB";
+  return `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`;
+}
+
+/** A peak reading from the waveform, 0-255, as a height 0-1 on the same
+ * decibel scale the volume line uses. A screen recording's peaks often sit
+ * around -22 dBFS; drawn on a straight multiplier they would be an almost
+ * invisible ridge, while on this scale the shape of the speech is plain. */
+export function peakHeight(peak: number): number {
+  if (peak <= 0) return 0;
+  const db = 20 * Math.log10(peak / 255);
+  return Math.max(0, Math.min(1, 1 - db / MIN_GAIN_DB));
+}
+
+/** What the backend reports for a file's audio. */
+export interface AudioPeaks {
+  peaks_per_second: number;
+  peaks: number[];
+}
+
+/** Eases the ends of a ramp so the line leaves one point and arrives at
+ * the next without a corner. Deliberately this rather than a spline
+ * through the points: a spline overshoots either side of a control point,
+ * and an overshoot on a volume line is a level nobody asked for. */
+function smoothstep(t: number): number {
+  return t * t * (3 - 2 * t);
+}
+
+/** The volume line's reading at a moment inside a clip. Flat before the
+ * first point and after the last, and a smooth ramp in between — which is
+ * what makes two points a fade.
+ *
+ * The ramp is worked in line positions rather than in multipliers, for two
+ * reasons that amount to the same thing: loudness is heard in decibels, so
+ * a fade that is even in decibels is the one that sounds even; and the
+ * line is drawn on a decibel scale, so this is what makes the curve on
+ * screen the curve that is actually heard. */
+export function gainAt(points: VolumePoint[] | undefined, seconds: number): number {
+  if (!points || points.length === 0) return 1;
+  if (points.length === 1) return points[0].gain;
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (seconds <= first.at) return first.gain;
+  if (seconds >= last.at) return last.gain;
+
+  for (let i = 1; i < points.length; i += 1) {
+    const from = points[i - 1];
+    const to = points[i];
+    if (seconds > to.at) continue;
+    const span = to.at - from.at;
+    if (span <= 0) return to.gain;
+    const eased = smoothstep((seconds - from.at) / span);
+    return gainForPosition(
+      positionForGain(from.gain) +
+        eased * (positionForGain(to.gain) - positionForGain(from.gain)),
+    );
+  }
+  return last.gain;
+}
+
+/** Divides a volume line at `offset` seconds into the clip, for a cut.
+ * Both halves get a point exactly on the seam, holding the level the line
+ * read there, so cutting a clip never changes how it sounds. */
+export function splitVolume(
+  points: VolumePoint[] | undefined,
+  offset: number,
+): [VolumePoint[] | undefined, VolumePoint[] | undefined] {
+  if (!points || points.length === 0) return [undefined, undefined];
+  const seam = gainAt(points, offset);
+  return [
+    [
+      ...points.filter((point) => point.at < offset),
+      { at: toMillis(offset), gain: seam },
+    ],
+    [
+      { at: 0, gain: seam },
+      ...points
+        .filter((point) => point.at > offset)
+        .map((point) => ({ at: toMillis(point.at - offset), gain: point.gain })),
+    ],
+  ];
+}
+
+/** Clip times are kept to the millisecond.
+ *
+ * Finer than anything that can be seen or heard, and it stops a run of
+ * edits from collecting the dust binary floating point leaves behind: a
+ * clip trimmed in and back out a few times would otherwise come to rest at
+ * 0.09999999999999964 seconds rather than a tenth of one, and two clips
+ * meant to meet exactly would miss each other by a millionth of a second. */
+export function toMillis(seconds: number): number {
+  return Math.round(seconds * 1000) / 1000;
+}
+
+/** The stretch of a volume line between two moments in a clip, rebased so
+ * it starts at zero again.
+ *
+ * Used when a clip's edges move: the line is measured from the clip's own
+ * start, so trimming the head off without moving the line with it would
+ * slide every fade away from the sound it was drawn against.
+ *
+ * Both ends get a point holding the level the line read there, so the
+ * shortened clip begins and ends exactly as loud as the original did at
+ * those moments. */
+export function sliceVolume(
+  points: VolumePoint[] | undefined,
+  from: number,
+  to: number,
+): VolumePoint[] | undefined {
+  if (!points || points.length === 0 || to <= from) return undefined;
+  // One point is a level rather than a shape; a level survives any trim.
+  if (points.length === 1) return points;
+
+  const inside = points
+    .filter((point) => point.at > from + 1e-6 && point.at < to - 1e-6)
+    .map((point) => ({ at: toMillis(point.at - from), gain: point.gain }));
+
+  return [
+    { at: 0, gain: gainAt(points, from) },
+    ...inside,
+    { at: toMillis(to - from), gain: gainAt(points, to) },
+  ];
+}
+
+/** The shortest a clip may be trimmed to. Long enough to still be grabbed
+ * and dragged back out again. */
+export const MIN_CLIP_SECONDS = 0.1;
+
+/** A clip's edges after a trim, with everything that depends on them
+ * brought along and every limit applied.
+ *
+ * `edge` says which end was dragged and `seconds` where it was dropped, in
+ * timeline time. The result is clamped to what the file can actually
+ * supply: the head cannot go back past the file's first frame, the tail
+ * cannot run past its last, and neither may cross the other.
+ *
+ * Absolute rather than a delta on purpose — a drag asks for the same edge
+ * position many times a second, and asking twice has to mean the same as
+ * asking once. */
+export function trimClip(
+  clip: TimelineClip,
+  edge: "start" | "end",
+  seconds: number,
+  mediaSeconds: number | null | undefined,
+): TimelineClip {
+  const trimStart = clip.trimStartSeconds ?? 0;
+  const end = clip.startSeconds + clip.durationSeconds;
+
+  if (edge === "start") {
+    // Back no further than the file's own beginning, and no later than a
+    // hair before the tail.
+    const earliest = Math.max(0, clip.startSeconds - trimStart);
+    const latest = end - MIN_CLIP_SECONDS;
+    const at = toMillis(Math.min(Math.max(seconds, earliest), latest));
+    const moved = at - clip.startSeconds;
+    return {
+      ...clip,
+      startSeconds: at,
+      trimStartSeconds: toMillis(trimStart + moved),
+      durationSeconds: toMillis(clip.durationSeconds - moved),
+      volume: sliceVolume(clip.volume, moved, clip.durationSeconds),
+      layoutPoints: sliceLayout(
+        clip.layoutPoints,
+        moved,
+        clip.durationSeconds,
+        clip.layout ?? FULL_FRAME_LAYOUT,
+      ),
+    };
+  }
+
+  // The tail can be pulled back out only as far as the file still has
+  // material; a still has none to run out of.
+  const available =
+    typeof mediaSeconds === "number" && mediaSeconds > 0
+      ? mediaSeconds - trimStart
+      : Number.POSITIVE_INFINITY;
+  const longest = clip.startSeconds + available;
+  const at = toMillis(
+    Math.min(Math.max(seconds, clip.startSeconds + MIN_CLIP_SECONDS), longest),
+  );
+  const duration = toMillis(at - clip.startSeconds);
+  return {
+    ...clip,
+    durationSeconds: duration,
+    volume: sliceVolume(clip.volume, 0, duration),
+    layoutPoints: sliceLayout(
+      clip.layoutPoints,
+      0,
+      duration,
+      clip.layout ?? FULL_FRAME_LAYOUT,
+    ),
+  };
+}
+
+/** Puts a clip on a track, making room for it.
+ *
+ * A track plays one thing at a time, so whatever the newcomer lands on
+ * gives way: a clip it covers entirely goes, one it overlaps at an edge is
+ * trimmed back, and one it lands in the middle of is left as a piece
+ * either side. A piece too short to be worth keeping is dropped rather
+ * than left as a sliver nobody can grab.
+ *
+ * Without this two clips would simply sit on top of each other and which
+ * one played was settled by whichever happened to come first in the
+ * array — an order that changed every time a clip was moved. The result is
+ * returned in time order, so "what is playing at this moment" has exactly
+ * one answer.
+ *
+ * Everything it does is one step to undo. */
+export function placeOnTrack(
+  clips: TimelineClip[],
+  incoming: TimelineClip,
+): TimelineClip[] {
+  const start = incoming.startSeconds;
+  const end = start + incoming.durationSeconds;
+  const kept: TimelineClip[] = [];
+  // A thousandth of a second: clips that merely touch do not overlap.
+  const touch = 1e-3;
+
+  for (const clip of clips) {
+    if (clip.id === incoming.id) continue;
+    const clipStart = clip.startSeconds;
+    const clipEnd = clipStart + clip.durationSeconds;
+
+    if (clipEnd <= start + touch || clipStart >= end - touch) {
+      kept.push(clip);
+      continue;
+    }
+
+    const headCovered = clipStart >= start - touch;
+    const tailCovered = clipEnd <= end + touch;
+    if (headCovered && tailCovered) continue;
+
+    // The head survives only if enough of it is left over, and likewise
+    // the tail. `trimClip` is what carries the volume line along with it.
+    const headLeft = start - clipStart;
+    const tailLeft = clipEnd - end;
+
+    if (!headCovered && headLeft >= MIN_CLIP_SECONDS) {
+      // Trimming inwards never runs out of file, so no length is needed.
+      kept.push(trimClip(clip, "end", start, null));
+    }
+    if (!tailCovered && tailLeft >= MIN_CLIP_SECONDS) {
+      const rest = trimClip(clip, "start", end, null);
+      // A clip split in two needs a second identity, or the halves would
+      // answer to the same selection and the same delete.
+      kept.push(headCovered ? rest : { ...rest, id: newId("clip") });
+    }
+  }
+
+  kept.push(incoming);
+  return kept.sort((a, b) => a.startSeconds - b.startSeconds);
+}
+
+/** How far one edge of a clip may be trimmed before it would run into its
+ * neighbour on the same track. A trim stops at the neighbour rather than
+ * eating it — dragging an edge is a small adjustment, and it should not be
+ * able to destroy the clip beside it by accident. */
+export function trimLimit(
+  clips: TimelineClip[],
+  clip: TimelineClip,
+  edge: "start" | "end",
+): number {
+  const end = clip.startSeconds + clip.durationSeconds;
+  if (edge === "start") {
+    let earliest = 0;
+    for (const other of clips) {
+      if (other.id === clip.id) continue;
+      const otherEnd = other.startSeconds + other.durationSeconds;
+      if (otherEnd <= clip.startSeconds + 1e-3) earliest = Math.max(earliest, otherEnd);
+    }
+    return earliest;
+  }
+  let latest = Number.POSITIVE_INFINITY;
+  for (const other of clips) {
+    if (other.id === clip.id) continue;
+    if (other.startSeconds >= end - 1e-3) latest = Math.min(latest, other.startSeconds);
+  }
+  return latest;
+}
+
+/** A flat line made explicit, so a point can be added to it. */
+export function volumePointsOf(clip: TimelineClip): VolumePoint[] {
+  const points = clip.volume;
+  if (points && points.length >= 2) return points;
+  const gain = points?.[0]?.gain ?? 1;
+  return [
+    { at: 0, gain },
+    { at: clip.durationSeconds, gain },
+  ];
+}
+
+/** Stamps `soundOnly` on the clips of audio tracks that predate the flag.
+ * Without it, an older project's split-off audio — which points at a video
+ * file — would be taken for a video clip and start showing a picture. */
+export function withSoundOnlyClips(tracks: TimelineTrack[]): TimelineTrack[] {
+  return tracks.map((track) =>
+    trackKindOf(track) !== "audio"
+      ? track
+      : {
+          ...track,
+          clips: track.clips.map((clip) =>
+            clip.soundOnly === undefined ? { ...clip, soundOnly: true } : clip,
+          ),
+        },
+  );
+}
+
+export function trackKindOf(track: TimelineTrack): TrackKind {
+  return track.kind ?? "video";
+}
+
+/** Names every track after where it sits, so the numbering stays right
+ * when one is added, split off or removed: video tracks are "Track 1",
+ * "Track 2" and so on, and an audio track takes the number of the video
+ * track its sound came from — Track 2's sound lands on "Audio 2".
+ *
+ * Called on every structural change rather than when a track is created,
+ * because a name written once goes stale the moment the track above it
+ * goes away. */
+export function withTrackNames(tracks: TimelineTrack[]): TimelineTrack[] {
+  const numberOf = new Map<string, number>();
+  let videos = 0;
+  for (const track of tracks) {
+    if (trackKindOf(track) === "video") {
+      videos += 1;
+      numberOf.set(track.id, videos);
+    }
+  }
+
+  // An audio track with no video track to point at can still be numbered;
+  // it just falls back to counting audio tracks in order.
+  let loose = 0;
+  return tracks.map((track) => {
+    let name: string;
+    if (trackKindOf(track) === "video") {
+      name = `Track ${numberOf.get(track.id)}`;
+    } else {
+      const paired = track.sourceTrackId
+        ? numberOf.get(track.sourceTrackId)
+        : undefined;
+      if (paired == null) loose += 1;
+      name = `Audio ${paired ?? loose}`;
+    }
+    return track.name === name ? track : { ...track, name };
+  });
 }
 
 /** How long a clip runs when its media hasn't reported a duration — a
@@ -190,8 +816,8 @@ export function newId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${idCounter}`;
 }
 
-export function newTrack(name: string): TimelineTrack {
-  return { id: newId("track"), name, clips: [] };
+export function newTrack(name: string, kind: TrackKind = "video"): TimelineTrack {
+  return { id: newId("track"), name, kind, clips: [] };
 }
 
 /** The contents of a `.jd` project file. Only what can't be recomputed is
@@ -203,13 +829,73 @@ export interface ProjectFile {
   format: "jdeditor-project";
   version: 1;
   name: string;
-  media: { path: string; name: string }[];
+  /** `path` is where the file was when the project was saved. `relative`
+   * is where it sits beneath the project's own folder, when it does — that
+   * is what lets a project and its footage be moved together without the
+   * clips losing sight of them. Opening tries the relative one first. */
+  media: { path: string; name: string; relative?: string }[];
   tracks?: TimelineTrack[];
   activeMediaPath: string | null;
   settings: EditorSettings;
 }
 
 export const PROJECT_EXTENSION = "jd";
+
+/* --------------------------------------------------------- media paths */
+
+/** Paths are compared and joined with forward slashes throughout. Windows
+ * accepts them everywhere, and mixing the two separators is how a path
+ * ends up not matching one that means the same place. */
+function normalisePath(path: string): string {
+  return path.split(String.fromCharCode(92)).join("/");
+}
+
+/** The folder a project file lives in. */
+export function projectFolder(projectPath: string): string {
+  const at = normalisePath(projectPath).lastIndexOf("/");
+  return at < 0 ? "" : normalisePath(projectPath).slice(0, at);
+}
+
+/** Where a media file sits relative to its project, when it sits beneath
+ * it at all.
+ *
+ * Only files under the project's own folder get one. That is the case
+ * worth supporting — a project and its footage kept together and moved
+ * together — and it is the only one where a relative path is certain to
+ * still mean the same file afterwards. Anything else stays absolute and
+ * relies on being found again by hand.
+ *
+ * Compared without regard to case, because Windows does not distinguish
+ * `C:/Videos` from `c:/videos` but string equality does. */
+export function toRelativeMediaPath(
+  mediaPath: string,
+  projectPath: string | null,
+): string | undefined {
+  if (!projectPath) return undefined;
+  const folder = projectFolder(projectPath);
+  if (!folder) return undefined;
+  const media = normalisePath(mediaPath);
+  const prefix = `${folder}/`;
+  if (media.toLowerCase().startsWith(prefix.toLowerCase())) {
+    return media.slice(prefix.length);
+  }
+  return undefined;
+}
+
+/** The other direction: a stored relative path made whole again against
+ * wherever the project is being opened from now. */
+export function fromRelativeMediaPath(
+  relative: string,
+  projectPath: string,
+): string {
+  const folder = projectFolder(projectPath);
+  return folder ? `${folder}/${normalisePath(relative)}` : normalisePath(relative);
+}
+
+/** A file's own name, without the folders above it. */
+export function mediaFileName(path: string): string {
+  return normalisePath(path).split("/").pop() ?? path;
+}
 
 export function formatDuration(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds)) return "";
@@ -223,3 +909,84 @@ export function formatDuration(seconds: number | null | undefined): string {
   return `${m}:${s}`;
 }
 
+
+/* ------------------------------------------------------------- exporting */
+
+export const EXPORT_FORMATS = ["mp4", "webm", "mov", "gif", "mp3"] as const;
+export type ExportFormat = (typeof EXPORT_FORMATS)[number];
+
+export const EXPORT_FORMAT_LABELS: Record<ExportFormat, string> = {
+  mp4: "MP4 · H.264 — plays everywhere",
+  webm: "WebM · VP9 — smaller, for the web",
+  mov: "MOV · H.264 — for Final Cut and friends",
+  gif: "GIF — short, silent, loops",
+  mp3: "MP3 — the sound only",
+};
+
+/** Every preset is 16:9, which is the shape of the preview: a clip of some
+ * other shape is letterboxed inside it there, and has to be letterboxed
+ * the same way here or the export wouldn't match what was edited. */
+export const EXPORT_RESOLUTIONS = ["480p", "720p", "1080p", "source"] as const;
+export type ExportResolution = (typeof EXPORT_RESOLUTIONS)[number];
+
+export const EXPORT_QUALITIES = ["small", "balanced", "best"] as const;
+export type ExportQuality = (typeof EXPORT_QUALITIES)[number];
+
+export const EXPORT_QUALITY_LABELS: Record<ExportQuality, string> = {
+  small: "Smaller file",
+  balanced: "Balanced",
+  best: "Best looking",
+};
+
+export const EXPORT_FPS_OPTIONS = [15, 24, 30, 60] as const;
+
+export interface ExportSettings {
+  format: ExportFormat;
+  resolution: ExportResolution;
+  quality: ExportQuality;
+  fps: number;
+}
+
+export const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
+  format: "mp4",
+  resolution: "1080p",
+  quality: "balanced",
+  fps: 30,
+};
+
+/** What the renderer is handed: placements reduced to numbers, with every
+ * question about tracks, layers and decibels already answered. */
+export interface ExportPlanClip {
+  path: string;
+  start: number;
+  duration: number;
+  trimStart: number;
+  visual: boolean;
+  audible: boolean;
+  still: boolean;
+  scale: number;
+  x: number;
+  y: number;
+  volume: VolumePoint[];
+  /** The zoom, sampled along the clip. Empty when its framing holds
+   * still, which is the common case and the cheap one to render. */
+  zoom: { at: number; scale: number; x: number; y: number }[];
+}
+
+export interface ExportPlan {
+  outputPath: string;
+  format: ExportFormat;
+  width: number;
+  height: number;
+  fps: number;
+  duration: number;
+  videoQuality: number;
+  audioBitrateKbps: number;
+  clips: ExportPlanClip[];
+}
+
+export interface ExportProgress {
+  fraction: number;
+  seconds_done: number;
+  seconds_total: number;
+}

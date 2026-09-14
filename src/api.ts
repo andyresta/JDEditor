@@ -1,8 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { IMPORT_FILTERS, PROJECT_EXTENSION } from "./types";
 import type {
+  AudioPeaks,
   BarSetup,
+  ExportFormat,
+  ExportPlan,
   DeviceList,
   MediaPrepared,
   Rect,
@@ -37,6 +41,14 @@ export const api = {
     open({ multiple: true, filters: IMPORT_FILTERS[kind] }) as Promise<
       string[] | null
     >,
+  /** One file, for putting a clip back in touch with media that moved. */
+  pickMediaFile: (name: string) =>
+    open({
+      multiple: false,
+      title: `Where is ${name}?`,
+      filters: IMPORT_FILTERS.visual,
+    }) as Promise<string | null>,
+  pathExists: (path: string) => invoke<boolean>("path_exists", { path }),
   pickProjectFile: () =>
     open({
       multiple: false,
@@ -52,4 +64,15 @@ export const api = {
   loadProject: (path: string) => invoke<string>("load_project", { path }),
   prepareMedia: (path: string) =>
     invoke<MediaPrepared>("prepare_media", { path }),
+  audioPeaks: (path: string) => invoke<AudioPeaks>("audio_peaks", { path }),
+  pickExportPath: (suggested: string, format: ExportFormat) =>
+    save({
+      defaultPath: suggested,
+      filters: [{ name: format.toUpperCase(), extensions: [format] }],
+    }),
+  writeTextImage: (clipId: string, bytes: number[]) =>
+    invoke<string>("write_text_image", { clipId, bytes }),
+  exportTimeline: (plan: ExportPlan) => invoke<string>("export_timeline", { plan }),
+  cancelExport: () => invoke<void>("cancel_export"),
+  revealFile: (path: string) => revealItemInDir(path),
 };
