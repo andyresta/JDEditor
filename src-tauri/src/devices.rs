@@ -372,3 +372,83 @@ mod platform {
         }
     }
 }
+
+/* ------------------------------------------------------- open windows */
+
+/// A window on screen that could be recorded on its own.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WindowInfo {
+    /// What the capture is asked for by name. Windows are matched by their
+    /// title bar, which is also the only thing a person recognises them by.
+    pub title: String,
+    /// The program it belongs to, for telling two windows of the same name
+    /// apart in the list.
+    pub app: String,
+}
+
+/// Every window with a title bar, as the capture would find them.
+///
+/// Read by asking the system for its processes and keeping the ones that
+/// have a main window with a name. That is exactly the set a capture can
+/// be pointed at: a window with no title cannot be named, and one with no
+/// window cannot be recorded.
+#[cfg(target_os = "windows")]
+pub fn list_windows() -> Vec<WindowInfo> {
+    use std::process::Command;
+
+    let script = "Get-Process \
+        | Where-Object { $_.MainWindowTitle -ne '' } \
+        | Select-Object MainWindowTitle, ProcessName \
+        | ConvertTo-Json -Compress";
+
+    let mut command = Command::new("powershell");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    {
+        use std::os::windows::process::CommandExt;
+        // The same reason ffmpeg is started this way: a console flashing
+        // over the screen is a console flashing into the recording.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
+        return Vec::new();
+    };
+
+    // One window comes back as an object rather than a list of one.
+    let rows = match &parsed {
+        serde_json::Value::Array(rows) => rows.clone(),
+        other => vec![other.clone()],
+    };
+
+    let mut windows: Vec<WindowInfo> = rows
+        .iter()
+        .filter_map(|row| {
+            let title = row.get("MainWindowTitle")?.as_str()?.trim().to_string();
+            if title.is_empty() {
+                return None;
+            }
+            let app = row
+                .get("ProcessName")
+                .and_then(|name| name.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some(WindowInfo { title, app })
+        })
+        .collect();
+
+    windows.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    windows.dedup_by(|a, b| a.title == b.title);
+    windows
+}
+
+/// Nothing to offer: capturing one window is a Windows feature here, and a
+/// list of windows that could not be recorded would only mislead.
+#[cfg(not(target_os = "windows"))]
+pub fn list_windows() -> Vec<WindowInfo> {
+    Vec::new()
+}

@@ -388,30 +388,36 @@
   background-size: 16px 16px;
 }
 
+/* The finished picture, at whatever size the window leaves it. Its size
+   is set from the measured space rather than by CSS: the export has to
+   arrive at the same frame from the same numbers, and a rule here is not
+   something the export can read. */
 .ed-shell .ed-backdrop {
-  /* Definite size so the video's max-width/height percentages resolve and
-     the stage flexes instead of overflowing. */
-  height: 100%;
-  aspect-ratio: 16 / 9;
-  max-width: 100%;
-  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--ed-pad, 32px);
   border-radius: 14px;
-  background-image: var(--ed-backdrop, none);
-  background-size: cover;
-  background-position: center;
   box-shadow: var(--ed-shadow-md);
   overflow: hidden;
   position: relative;
-  transition: padding 0.08s linear;
 }
 
+/* The backdrop itself, painted by the same code that paints it into the
+   finished file. */
+.ed-shell .ed-backdrop-paint {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Nothing to frame yet: no backdrop painted, and a plain inset for the
+   message. It keeps the project's shape all the same — an empty portrait
+   project that showed a widescreen box would be saying the wrong thing
+   about what is being cut. */
 .ed-shell .ed-backdrop.is-empty {
   padding: 20px;
-  background-image: none;
   box-shadow: none;
 }
 
@@ -420,10 +426,7 @@
    layout, being fractions of it, means the same picture whatever size the
    window leaves the preview. */
 .ed-shell .ed-stage-frame {
-  position: relative;
-  flex: 1 1 auto;
-  align-self: stretch;
-  min-width: 0;
+  position: absolute;
 }
 
 /* One clip in the stack. Placed by its own layout: `left`/`top` put its
@@ -435,7 +438,11 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  max-height: 100%;
+  /* Deliberately not capped to the stage's height. A cap kept the layer
+     inside the frame but left its width alone, so a clip filling the stage
+     came out wider than its own shape and the video sat letterboxed inside
+     it — black bars the finished file never had. A layer taller than the
+     stage is simply cropped by the frame, which is what the export does. */
 }
 
 .ed-shell .ed-layer.is-movable {
@@ -513,7 +520,13 @@
 }
 
 /* A still gets the same frame treatment as a clip — the backdrop, padding
-   and corner radius are what the preview is for. */
+   and corner radius are what the preview is for.
+
+   No drop shadow. There was one here, and it was a lie: the renderer has
+   no way to cast the same shadow under a clip whose framing moves, so
+   every export came out without it. A flattering preview that the
+   finished file cannot keep is worse than no flattery at all. If shadows
+   are wanted they belong on both sides or on neither. */
 .ed-shell .ed-video,
 .ed-shell .ed-still {
   display: block;
@@ -523,7 +536,6 @@
   max-height: 100%;
   object-fit: contain;
   border-radius: var(--ed-radius, 12px);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
   /* The layer around it takes the pointer, so a drag can't be swallowed by
      the media element's own handling. */
   pointer-events: none;
@@ -740,19 +752,22 @@
   overflow: hidden;
 }
 
+/* Wraps onto a second row rather than running off the edge. There are six
+   of these now, and six words do not fit across a 300px column at a size
+   anyone would want to read — the last of them simply disappeared past the
+   right-hand edge. */
 .ed-shell .ed-tabs {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 2px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--ed-border);
 }
 
-/* Three labelled tabs across 300px: 12px type and tight padding keeps
-   "Background" on one line. */
 .ed-shell .ed-tab {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   height: 30px;
   padding: 0 4px;
@@ -1096,6 +1111,240 @@
   font-size: 12px;
   font-weight: 500;
   color: var(--ed-text-dim);
+}
+
+/* A toolbar chip that opens a short menu under itself. */
+.ed-shell .ed-chipmenu {
+  position: relative;
+}
+
+.ed-shell .ed-chipmenu-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  min-width: 186px;
+  padding: 5px;
+  border: 1px solid var(--ed-border);
+  border-radius: 10px;
+  background: var(--ed-surface);
+  box-shadow: var(--ed-shadow-md);
+}
+
+.ed-shell .ed-chipmenu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ed-text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ed-shell .ed-chipmenu-item:hover {
+  background: var(--ed-surface-2);
+}
+
+.ed-shell .ed-chipmenu-item.is-active {
+  background: var(--ed-accent-soft);
+}
+
+.ed-shell .ed-chipmenu-name {
+  flex: 1;
+}
+
+.ed-shell .ed-chipmenu-note {
+  color: var(--ed-text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A little box in the menu drawn at the shape it stands for, so the
+   difference between 9:16 and 4:5 can be seen rather than worked out. */
+.ed-shell .ed-shape-art {
+  flex: none;
+  height: 20px;
+  border-radius: 3px;
+  border: 1.5px solid var(--ed-text-dim);
+}
+
+.ed-shell .ed-chipmenu-item.is-active .ed-shape-art {
+  border-color: var(--ed-accent);
+  background: var(--ed-accent);
+}
+
+/* The reading beside a slider's name: the number the slider is on, so the
+   setting can be said exactly rather than guessed from a handle. */
+.ed-shell .ed-field-value {
+  float: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--ed-text);
+}
+
+/* ------------------------------------------------------- transitions tab */
+
+/* Which end of the clip is being edited. Two choices, so a pair of joined
+   buttons rather than a dropdown that hides one of them. */
+.ed-shell .ed-segmented {
+  display: flex;
+  margin-bottom: 14px;
+  padding: 3px;
+  gap: 3px;
+  border-radius: 9px;
+  background: var(--ed-surface-2);
+  border: 1px solid var(--ed-border);
+}
+
+.ed-shell .ed-segment {
+  flex: 1;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ed-text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.ed-shell .ed-segment:hover {
+  color: var(--ed-text);
+}
+
+.ed-shell .ed-segment.is-active {
+  background: var(--ed-surface);
+  color: var(--ed-text);
+  box-shadow: var(--ed-shadow-sm);
+}
+
+/* The speeds worth a button of their own, so the common ones are one
+   press rather than a slider to be nudged onto a round number. */
+.ed-shell .ed-speeds {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 14px;
+}
+
+.ed-shell .ed-speed {
+  padding: 8px 4px;
+  border: 1px solid var(--ed-border);
+  border-radius: 8px;
+  background: var(--ed-surface);
+  color: var(--ed-text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.ed-shell .ed-speed:hover {
+  border-color: var(--ed-accent-soft);
+  color: var(--ed-text);
+}
+
+.ed-shell .ed-speed.is-active {
+  border-color: var(--ed-accent);
+  color: var(--ed-text);
+  box-shadow: inset 0 0 0 1px var(--ed-accent);
+}
+
+.ed-shell .ed-transitions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0 12px;
+}
+
+.ed-shell .ed-transition {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 6px 9px;
+  border: 1px solid var(--ed-border);
+  border-radius: 10px;
+  background: var(--ed-surface);
+  color: var(--ed-text-dim);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.25;
+  text-align: center;
+  cursor: pointer;
+}
+
+.ed-shell .ed-transition:hover {
+  border-color: var(--ed-accent-soft);
+  color: var(--ed-text);
+}
+
+.ed-shell .ed-transition.is-active {
+  border-color: var(--ed-accent);
+  color: var(--ed-text);
+  box-shadow: inset 0 0 0 1px var(--ed-accent);
+}
+
+/* A small picture of what each one does: two panels, and how the second
+   one takes the place of the first. Drawn rather than named, because
+   "slide from left" is quicker to recognise than to read. */
+.ed-shell .ed-transition-art {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--ed-surface-3);
+}
+
+.ed-shell .ed-transition-art::before,
+.ed-shell .ed-transition-art::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.ed-shell .ed-transition-art::before {
+  background: var(--ed-text-dim);
+  opacity: 0.45;
+}
+
+.ed-shell .ed-transition-art::after {
+  background: var(--ed-accent);
+}
+
+/* A cut: the second panel simply covers half the frame, edge to edge. */
+.ed-shell .ed-transition-art.is-cut::after {
+  left: 50%;
+}
+
+.ed-shell .ed-transition-art.is-dissolve::after {
+  opacity: 0.55;
+}
+
+.ed-shell .ed-transition-art.is-slide-left::after {
+  right: 45%;
+}
+
+.ed-shell .ed-transition-art.is-slide-right::after {
+  left: 45%;
+}
+
+.ed-shell .ed-transition-art.is-slide-up::after {
+  bottom: 45%;
+}
+
+.ed-shell .ed-transition-art.is-slide-down::after {
+  top: 45%;
+}
+
+.ed-shell .ed-transition-art.is-zoom::after {
+  inset: 26% 30%;
+  border-radius: 3px;
 }
 
 .ed-shell .ed-note {
@@ -1887,6 +2136,70 @@
    the full width of the clip and would otherwise take the press: trimming
    an edge is the more common gesture by far, and the line can still be
    reached anywhere between the two. */
+/* The transition on a clip's edge, drawn as a wedge whose slope is the
+   fade itself: thick where the clip is fully there, tapering to nothing
+   where it has not arrived. Sits under the trim handles so that dragging
+   an edge is never blocked by it. */
+/* The box dragged across the timeline to pick clips out. Fixed to the
+   window because that is the frame its corners were measured in. */
+.ed-shell .ed-marquee {
+  position: fixed;
+  z-index: 55;
+  pointer-events: none;
+  border: 1px solid var(--ed-accent);
+  border-radius: 3px;
+  background: var(--ed-accent);
+  opacity: 0.18;
+}
+
+/* Separates what a clip does from what its sound does. */
+.ed-shell .ed-clipmenu-rule {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--ed-border);
+}
+
+/* The shortcut beside a menu entry, pushed to the right so the names line
+   up down the left. */
+.ed-shell .ed-clipmenu-key {
+  margin-left: auto;
+  padding-left: 14px;
+  color: var(--ed-text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A track name being typed, in the space the name itself was in. */
+.ed-shell .ed-tracklabel-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 5px;
+  border: 1px solid var(--ed-accent);
+  border-radius: 5px;
+  background: var(--ed-surface);
+  color: var(--ed-text);
+  font: inherit;
+}
+
+.ed-shell .ed-clip-transition {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 3;
+  pointer-events: none;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.ed-shell .ed-clip-transition.is-start {
+  left: 0;
+  clip-path: polygon(0 100%, 100% 0, 100% 100%);
+}
+
+.ed-shell .ed-clip-transition.is-end {
+  right: 0;
+  clip-path: polygon(0 0, 100% 100%, 0 100%);
+}
+
 .ed-shell .ed-clip-trim {
   position: absolute;
   top: 0;

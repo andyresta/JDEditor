@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use tauri::Manager;
 
 /// The extension a saved project carries.
 pub const EXTENSION: &str = "jd";
@@ -31,5 +32,57 @@ fn with_extension(path: &str) -> PathBuf {
             name.push(format!(".{EXTENSION}"));
             path.with_file_name(name)
         }
+    }
+}
+
+/* ------------------------------------------------------------- recovery */
+
+/// What the editor keeps its unsaved work in between saves.
+///
+/// One slot, in the app's own cache folder rather than beside the user's
+/// project: a project that has never been saved has no folder to sit
+/// beside, and a half-written copy of someone's film appearing next to the
+/// real one is its own kind of confusion.
+const RECOVERY_FILE: &str = "recovery.json";
+
+fn recovery_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join(RECOVERY_FILE))
+}
+
+/// Keeps a copy of the work in progress.
+///
+/// Written whole and then moved into place, so a crash halfway through
+/// writing leaves the last good copy rather than a truncated one — the
+/// failure this exists to survive is exactly the one that would otherwise
+/// happen while it was being written.
+pub fn write_recovery(app: &tauri::AppHandle, contents: &str) -> Result<(), String> {
+    let path = recovery_path(app)?;
+    let pending = path.with_extension("part");
+    std::fs::write(&pending, contents).map_err(|e| e.to_string())?;
+    std::fs::rename(&pending, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The work left behind by a session that ended without saving, if there
+/// is any. None when the last session was closed with everything saved.
+pub fn read_recovery(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    let path = recovery_path(app)?;
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Forgets it: the work has been saved, or the user has said to let it go.
+/// Only ever removes this copy — the project's own file is never touched.
+pub fn clear_recovery(app: &tauri::AppHandle) -> Result<(), String> {
+    let path = recovery_path(app)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
     }
 }

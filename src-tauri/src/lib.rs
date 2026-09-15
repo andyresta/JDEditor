@@ -146,6 +146,12 @@ async fn load_project(path: String) -> Result<String, String> {
     blocking(move || project::load(&path)).await?
 }
 
+/// The windows on screen that a recording could be pointed at.
+#[tauri::command]
+async fn list_windows() -> Result<Vec<devices::WindowInfo>, String> {
+    blocking(devices::list_windows).await
+}
+
 /// Whether a file is where it is said to be.
 ///
 /// A project remembers where its footage was; opening one somewhere else,
@@ -157,18 +163,38 @@ async fn path_exists(path: String) -> Result<bool, String> {
     blocking(move || std::path::Path::new(&path).is_file()).await
 }
 
-/// Stores a title's picture where the renderer can reach it.
-///
-/// The editor draws its titles onto a canvas and hands the bytes over;
-/// they are put beside the thumbnails, named after the clip, so a second
-/// export simply replaces the first rather than piling up.
+/// Keeps a copy of the work in progress, so that an editor that never got
+/// the chance to close properly can offer it back.
 #[tauri::command]
-async fn write_text_image(
+async fn write_recovery(app: tauri::AppHandle, contents: String) -> Result<(), String> {
+    blocking(move || project::write_recovery(&app, &contents)).await?
+}
+
+/// The unsaved work of a session that ended badly, if there was one.
+#[tauri::command]
+async fn read_recovery(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    blocking(move || project::read_recovery(&app)).await?
+}
+
+/// Forgets the copy. The project's own file is never touched by this.
+#[tauri::command]
+async fn clear_recovery(app: tauri::AppHandle) -> Result<(), String> {
+    blocking(move || project::clear_recovery(&app)).await?
+}
+
+/// Stores a picture the editor drew where the renderer can reach it.
+///
+/// Titles and the backdrop are both painted on a canvas by the editor and
+/// handed over as bytes; they are put beside the thumbnails, named after
+/// what they belong to, so a second export replaces the first rather than
+/// piling up.
+#[tauri::command]
+async fn write_overlay_image(
     app: tauri::AppHandle,
-    clip_id: String,
+    name: String,
     bytes: Vec<u8>,
 ) -> Result<String, String> {
-    blocking(move || export::write_text_image(&app, &clip_id, &bytes)).await?
+    blocking(move || export::write_overlay_image(&app, &name, &bytes)).await?
 }
 
 /// Renders the timeline to a file. Long-running by nature, so it runs off
@@ -191,8 +217,11 @@ async fn cancel_export(app: tauri::AppHandle) -> Result<(), String> {
 /// Decoding a long file takes a moment, so like `prepare_media` this runs
 /// off the UI thread and the editor draws a flat line until it answers.
 #[tauri::command]
-async fn audio_peaks(path: String) -> Result<waveform::AudioPeaks, String> {
-    blocking(move || waveform::read(&path)).await?
+async fn audio_peaks(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<waveform::AudioPeaks, String> {
+    blocking(move || waveform::read(&app, &path)).await?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -227,7 +256,11 @@ pub fn run() {
             load_project,
             audio_peaks,
             path_exists,
-            write_text_image,
+            list_windows,
+            write_recovery,
+            read_recovery,
+            clear_recovery,
+            write_overlay_image,
             export_timeline,
             cancel_export,
         ])

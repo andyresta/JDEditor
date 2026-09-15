@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -11,6 +12,14 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { audioGraph } from "../audioGraph";
+import {
+  drawBackdrop,
+  fitFrame,
+  frameGeometry,
+  hasBackdrop,
+  PALETTES,
+  paletteOf,
+} from "../frame";
 import { drawTextLayer } from "../textLayer";
 import { MenuBar, type MenuDef } from "./MenuBar";
 import {
@@ -18,6 +27,27 @@ import {
   BACKDROP_KINDS,
   FULL_FRAME_LAYOUT,
   MAX_ZOOM,
+  clipBefore,
+  DEFAULT_TRANSITION_SECONDS,
+  moveSelection,
+  type ClipMove,
+  formatSpeed,
+  FRAME_SHAPES,
+  FRAME_SHAPE_LABELS,
+  MAX_SPEED,
+  mediaSpan,
+  mediaTimeAt,
+  MIN_SPEED,
+  SPEED_PRESETS,
+  speedOf,
+  holdForTransition,
+  MAX_TRANSITION_SECONDS,
+  MIN_TRANSITION_SECONDS,
+  TRANSITIONS,
+  TRANSITION_LABELS,
+  transitionSeconds as transitionSecondsOf,
+  type TransitionKind,
+  layerFramingAt,
   isTextClip,
   layoutAt,
   DEFAULT_CLIP_SECONDS,
@@ -31,10 +61,10 @@ import {
   positionForGain,
   volumePointsOf,
   type BackdropCategory,
-  type BackdropKind,
   type ClipLayout,
   type EditorSettings,
   type MediaItem,
+  type Transition,
   trackHeightOf,
   trackKindOf,
   TRACK_HEIGHT,
@@ -68,12 +98,16 @@ interface EditorShellProps {
   onSaveProjectAs: () => void;
   onCloseProject: () => void;
   tracks: TimelineTrack[];
-  selectedClipId: string | null;
-  onSelectClip: (clipId: string | null) => void;
+  /** Every clip picked out on the timeline, in the order they were added
+   * to the selection. Empty when nothing is selected. */
+  selectedClipIds: string[];
+  onSelectClips: (clipIds: string[]) => void;
   onAddTrack: () => void;
   onAddClip: (trackId: string, mediaPath: string, startSeconds: number) => void;
-  onMoveClip: (clipId: string, trackId: string, startSeconds: number) => void;
-  onRemoveClip: (clipId: string) => void;
+  /** Where clips are to end up. More than one when a whole selection was
+   * dragged, in which case they all move together. */
+  onMoveClips: (moves: ClipMove[]) => void;
+  onRemoveClips: (clipIds: string[]) => void;
   /** `atSeconds` is the clip's own time, which is what a zoom point is
    * measured in. */
   onUpdateClipLayout: (clipId: string, layout: ClipLayout, atSeconds: number) => void;
@@ -83,6 +117,14 @@ interface EditorShellProps {
   onRemoveLayoutPoint: (clipId: string, atSeconds: number) => void;
   onToggleClipMute: (clipId: string) => void;
   onSplitClipAudio: (clipId: string) => void;
+  /** How fast the clip plays. Its length on the timeline changes with it. */
+  onSetSpeed: (clipIds: string[], speed: number) => void;
+  /** How the selected clip arrives or leaves. Undefined takes it off. */
+  onSetTransition: (
+    clipIds: string[],
+    edge: "in" | "out",
+    transition: Transition | undefined,
+  ) => void;
   onUpdateClipVolume: (clipId: string, points: VolumePoint[] | undefined) => void;
   /** Each file's loudness envelope, by path, as it arrives. */
   audioPeaks: Map<string, AudioPeaks>;
@@ -91,13 +133,18 @@ interface EditorShellProps {
   onUndo: () => void;
   onRedo: () => void;
   onExport: () => void;
-  clipboardHasClip: boolean;
-  onCopyClip: (clipId: string) => void;
-  onPasteClip: (trackId: string, seconds: number) => void;
-  onDuplicateClip: (clipId: string) => void;
+  /** How many clips are on the clipboard. */
+  clipboardCount: number;
+  onCopyClips: (clipIds: string[]) => void;
+  onPasteClips: (trackId: string, seconds: number) => void;
+  onDuplicateClips: (clipIds: string[]) => void;
   /** Moves one edge of a clip to a moment on the timeline. */
   onTrimClip: (clipId: string, edge: "start" | "end", seconds: number) => void;
   onResizeTrack: (trackId: string, height: number | undefined) => void;
+  /** Takes a track away, clips and all. */
+  onRemoveTrack: (trackId: string) => void;
+  /** Names a track by hand. An empty name puts it back to being numbered. */
+  onRenameTrack: (trackId: string, name: string) => void;
   /** Cuts at a moment on the timeline — one clip by id, or every clip
    * under the playhead. Answers with how many were cut. */
   onCutAt: (atSeconds: number, clipId?: string) => number;
@@ -158,6 +205,15 @@ interface Layer {
   /** Index of the track it came from. 0 is the bottom of the stack. */
   depth: number;
   layout: ClipLayout;
+  /** 0 is invisible, 1 fully there. Anything between is a transition. */
+  opacity: number;
+  /** Where a title's words sit inside its drawing. A title's `layout` is
+   * the drawing's own place in the frame, which only a transition moves. */
+  textLayout?: ClipLayout;
+  /** On screen only because the clip after it is arriving over the top.
+   * Its picture carries on; its sound does not, because a transition is
+   * something that happens to the picture. */
+  holding: boolean;
   /** Whether it can be moved about the frame. The stand-in layer shown for
    * a sidebar selection isn't part of the edit, so it can't be. */
   movable: boolean;
@@ -185,6 +241,7 @@ function isTyping(): boolean {
 
 type IconName =
   | "trash"
+  | "pencil"
   | "folder"
   | "undo"
   | "redo"
@@ -235,6 +292,13 @@ function iconPaths(name: IconName) {
           <path d="M9 7V4.8A.8.8 0 0 1 9.8 4h4.4a.8.8 0 0 1 .8.8V7" />
           <path d="M6.5 7l.8 12.2a.9.9 0 0 0 .9.8h7.6a.9.9 0 0 0 .9-.8L17.5 7" />
           <path d="M10 11v6M14 11v6" />
+        </>
+      );
+    case "pencil":
+      return (
+        <>
+          <path d="M4 20h4L19.2 8.8a2 2 0 0 0 0-2.8l-1.2-1.2a2 2 0 0 0-2.8 0L4 16z" />
+          <path d="M14.5 6.5l3 3" />
         </>
       );
     case "folder":
@@ -378,99 +442,27 @@ function iconPaths(name: IconName) {
   }
 }
 
-/* ------------------------------------------------------- backdrop presets */
-
-/** 7 colour pairs per category; every visual is a pure CSS gradient. */
-const PALETTES: Record<BackdropCategory, [string, string][]> = {
-  macOS: [
-    ["#6d8bff", "#c86dd7"],
-    ["#ff9a8b", "#ff6a88"],
-    ["#43cea2", "#185a9d"],
-    ["#fbc2eb", "#a6c1ee"],
-    ["#f6d365", "#fda085"],
-    ["#5ee7df", "#b490ca"],
-    ["#30cfd0", "#330867"],
-  ],
-  Dark: [
-    ["#232526", "#414345"],
-    ["#0f2027", "#2c5364"],
-    ["#1c1c24", "#3a3a52"],
-    ["#111827", "#374151"],
-    ["#141e30", "#243b55"],
-    ["#16222a", "#3a6073"],
-    ["#000000", "#434343"],
-  ],
-  Blue: [
-    ["#2193b0", "#6dd5ed"],
-    ["#1e3c72", "#2a5298"],
-    ["#396cd8", "#89c6ff"],
-    ["#0093e9", "#80d0c7"],
-    ["#4facfe", "#00f2fe"],
-    ["#13547a", "#80d0c7"],
-    ["#2563eb", "#1e40af"],
-  ],
-  Cities: [
-    ["#f5af19", "#f12711"],
-    ["#3a1c71", "#ffaf7b"],
-    ["#485563", "#29323c"],
-    ["#7f7fd5", "#91eae4"],
-    ["#c31432", "#240b36"],
-    ["#eacda3", "#d6ae7b"],
-    ["#42275a", "#734b6d"],
-  ],
-  Purple: [
-    ["#8e2de2", "#4a00e0"],
-    ["#a18cd1", "#fbc2eb"],
-    ["#6a11cb", "#2575fc"],
-    ["#c471f5", "#fa71cd"],
-    ["#7028e4", "#e5b2ca"],
-    ["#654ea3", "#eaafc8"],
-    ["#5f2c82", "#49a09d"],
-  ],
-  Orange: [
-    ["#ff7e5f", "#feb47b"],
-    ["#f83600", "#f9d423"],
-    ["#ffb75e", "#ed8f03"],
-    ["#ff512f", "#f09819"],
-    ["#fc4a1a", "#f7b733"],
-    ["#e65c00", "#f9d423"],
-    ["#cb2d3e", "#ef473a"],
-  ],
-};
-
+/** The little square in the sidebar that stands for a backdrop choice.
+ * Only ever an illustration of a colour pair, so CSS draws it; the
+ * backdrop proper is painted by `drawBackdrop`, which is also what the
+ * export writes. */
 function swatchGradient(category: BackdropCategory, index: number): string {
-  const [a, b] = PALETTES[category][index] ?? PALETTES[category][0];
+  const [a, b] = paletteOf(category, index);
   return `linear-gradient(135deg, ${a} 0%, ${b} 100%)`;
 }
 
-function backdropFor(
-  kind: BackdropKind,
-  category: BackdropCategory,
-  index: number,
-): string {
-  const [a, b] = PALETTES[category][index] ?? PALETTES[category][0];
-  switch (kind) {
-    case "Desktop":
-      return "linear-gradient(160deg, #dfe6f2 0%, #b9c6dd 50%, #8fa2c4 100%)";
-    case "Wallpaper":
-      return `linear-gradient(135deg, ${a} 0%, ${b} 100%)`;
-    case "Image":
-      return (
-        `radial-gradient(60% 70% at 20% 20%, ${a} 0%, transparent 65%),` +
-        `radial-gradient(70% 80% at 80% 30%, ${b} 0%, transparent 70%),` +
-        `radial-gradient(80% 80% at 50% 90%, ${a}bb 0%, transparent 70%),` +
-        `linear-gradient(160deg, ${b} 0%, ${a} 100%)`
-      );
-    case "Color":
-      return `linear-gradient(${a}, ${a})`;
-    case "Gradient":
-      return `linear-gradient(to bottom right, ${a} 0%, ${b} 55%, ${a} 100%)`;
-    case "None":
-      return "none";
-  }
-}
 
 /* ---------------------------------------------------------------- helpers */
+
+/** What stands in for a title in the places that expect a media file. */
+function titleStandIn(clip: TimelineClip): MediaItem {
+  return {
+    path: "",
+    name: clip.text?.content.split(String.fromCharCode(10))[0] || "Title",
+    kind: "image",
+    status: "ready",
+  };
+}
 
 function formatTimecode(seconds: number): string {
   const safe = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
@@ -507,12 +499,20 @@ function kindLabel(kind: MediaKind): string {
   return "Video";
 }
 
-type SidebarTab = "media" | "audio" | "text" | "background";
+type SidebarTab =
+  | "media"
+  | "audio"
+  | "text"
+  | "transitions"
+  | "speed"
+  | "background";
 
 const SIDEBAR_TABS: { id: SidebarTab; label: string }[] = [
   { id: "media", label: "Media" },
   { id: "audio", label: "Audio" },
   { id: "text", label: "Text" },
+  { id: "transitions", label: "Transitions" },
+  { id: "speed", label: "Speed" },
   { id: "background", label: "Background" },
 ];
 
@@ -708,12 +708,12 @@ export function EditorShell({
   onSaveProjectAs,
   onCloseProject,
   tracks,
-  selectedClipId,
-  onSelectClip,
+  selectedClipIds,
+  onSelectClips,
   onAddTrack,
   onAddClip,
-  onMoveClip,
-  onRemoveClip,
+  onMoveClips,
+  onRemoveClips,
   onUpdateClipLayout,
   onAddLayoutPoint,
   onRemoveLayoutPoint,
@@ -721,6 +721,8 @@ export function EditorShell({
   onUpdateText,
   onToggleClipMute,
   onSplitClipAudio,
+  onSetTransition,
+  onSetSpeed,
   onUpdateClipVolume,
   audioPeaks,
   canUndo,
@@ -728,12 +730,14 @@ export function EditorShell({
   onUndo,
   onRedo,
   onExport,
-  clipboardHasClip,
-  onCopyClip,
-  onPasteClip,
-  onDuplicateClip,
+  clipboardCount,
+  onCopyClips,
+  onPasteClips,
+  onDuplicateClips,
   onTrimClip,
   onResizeTrack,
+  onRemoveTrack,
+  onRenameTrack,
   onCutAt,
 }: EditorShellProps) {
   const [toast, setToast] = useState<string | null>(null);
@@ -743,6 +747,31 @@ export function EditorShell({
   const [showInspector, setShowInspector] = useState(true);
   const [showTimeline, setShowTimeline] = useState(true);
   const [activeTab, setActiveTab] = useState<SidebarTab>("media");
+  const [shapeMenuOpen, setShapeMenuOpen] = useState(false);
+  /** The box being dragged across the timeline to pick clips out, in the
+   * coordinates of the window. Null when nothing is being dragged. */
+  const [marquee, setMarquee] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  /** The track whose menu is open, and where it was opened. */
+  const [trackMenu, setTrackMenu] = useState<{
+    trackId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  /** The track whose name is being typed. */
+  const [renamingTrackId, setRenamingTrackId] = useState<string | null>(null);
+  /** Which end of the selected clip the transitions tab is editing. */
+  const [transitionEdge, setTransitionEdge] = useState<"in" | "out">("in");
+  /** How long a transition is made when one is picked. Kept here rather
+   * than on the clip so that choosing a length and then trying three
+   * different transitions does not mean setting the length three times. */
+  const [transitionSecondsWanted, setTransitionSecondsWanted] = useState(
+    DEFAULT_TRANSITION_SECONDS,
+  );
 
   // Timeline drag-and-drop. The payload lives in a ref because dragover
   // fires dozens of times a second and none of it should re-render; only
@@ -753,7 +782,8 @@ export function EditorShell({
 
   // Appearance and timeline zoom live in the project now, so every one of
   // them is read from props and written back through onSettingsChange.
-  const { backdropKind, category, swatch, padding, rounded, timelineZoom } = settings;
+  const { aspect, backdropKind, category, swatch, padding, rounded, timelineZoom } =
+    settings;
 
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -844,6 +874,10 @@ export function EditorShell({
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
   const rulerRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  /** The space the preview has to fill, and the backdrop drawn into it. */
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const backdropRef = useRef<HTMLCanvasElement | null>(null);
+  const [previewArea, setPreviewArea] = useState({ width: 0, height: 0 });
   /** The block of track rows. Measured rather than worked out from a row
    * height, because rows can each be dragged to their own height — the
    * playhead has to stop exactly at the last of them either way. */
@@ -852,6 +886,20 @@ export function EditorShell({
   /** The stage's size in pixels. A title is measured against the frame's
    * height, so it has to be known before one can be drawn. */
   const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
+  /** The biggest frame that fits the space, in the shape the export
+   * writes — so what is on screen is the finished picture, scaled. */
+  const previewFrame = useMemo(
+    () => fitFrame(previewArea.width, previewArea.height, aspect),
+    [previewArea.width, previewArea.height, aspect],
+  );
+  /** The stage inside that frame: where the footage is placed, inset by
+   * the padding. Worked out by the same function the export uses, from the
+   * same settings, so a clip sits at the same fraction of the picture in
+   * the finished file as it does on screen. */
+  const geometry = useMemo(
+    () => frameGeometry(previewFrame.width, previewFrame.height, { padding, rounded }),
+    [previewFrame.width, previewFrame.height, padding, rounded],
+  );
   const [scrubbing, setScrubbing] = useState(false);
   /** The transport keys reach the current handlers through here, so they
    * can be bound once for the life of the editor rather than rebound on
@@ -985,41 +1033,45 @@ export function EditorShell({
   // takes text — the project name field, a slider's number box, anything
   // contenteditable — must never lose a clip instead of a character.
   useEffect(() => {
-    const clipId = selectedClipId;
-    if (!clipId) return;
-    // An arrow const, not a hoisted declaration, so the narrowing above
-    // still holds inside it.
+    if (selectedClipIds.length === 0) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Delete" && e.key !== "Backspace") return;
       if (isTyping()) return;
       e.preventDefault();
-      onRemoveClip(clipId);
+      onRemoveClips(selectedClipIds);
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [selectedClipId, onRemoveClip]);
+  }, [selectedClipIds, onRemoveClips]);
 
   /** Where a paste lands: on the track holding whatever is selected, or
    * the first track when nothing is, and at the playhead. */
   function pasteTarget(): string | null {
     const withSelection = tracks.find((track) =>
-      track.clips.some((clip) => clip.id === selectedClipId),
+      track.clips.some((clip) => selectedClipIds.includes(clip.id)),
     );
     return (withSelection ?? tracks[0])?.id ?? null;
   }
 
-  function copySelectedClip(alsoRemove: boolean) {
-    if (!selectedClipId) {
+  /** "1 clip" / "3 clips", for saying what just happened. */
+  function countedClips(n: number): string {
+    return n === 1 ? "1 clip" : `${n} clips`;
+  }
+
+  function copySelectedClips(alsoRemove: boolean) {
+    if (selectedClipIds.length === 0) {
       setToast("Select a clip on the timeline first.");
       return;
     }
-    onCopyClip(selectedClipId);
-    if (alsoRemove) onRemoveClip(selectedClipId);
-    setToast(alsoRemove ? "Clip cut." : "Clip copied.");
+    onCopyClips(selectedClipIds);
+    if (alsoRemove) onRemoveClips(selectedClipIds);
+    setToast(
+      `${countedClips(selectedClipIds.length)} ${alsoRemove ? "cut" : "copied"}.`,
+    );
   }
 
-  function pasteClip() {
-    if (!clipboardHasClip) {
+  function pasteClips() {
+    if (clipboardCount === 0) {
       setToast("Nothing has been copied yet.");
       return;
     }
@@ -1028,15 +1080,15 @@ export function EditorShell({
       setToast("Add a track to paste onto.");
       return;
     }
-    onPasteClip(trackId, toMillis(currentTime));
+    onPasteClips(trackId, toMillis(currentTime));
   }
 
-  function duplicateSelectedClip() {
-    if (!selectedClipId) {
+  function duplicateSelectedClips() {
+    if (selectedClipIds.length === 0) {
       setToast("Select a clip on the timeline first.");
       return;
     }
-    onDuplicateClip(selectedClipId);
+    onDuplicateClips(selectedClipIds);
   }
 
   // Reached from the keyboard through a ref, so the shortcuts can be bound
@@ -1047,18 +1099,18 @@ export function EditorShell({
     duplicate: () => {},
   });
   clipboardRef.current = {
-    copy: copySelectedClip,
-    paste: pasteClip,
-    duplicate: duplicateSelectedClip,
+    copy: copySelectedClips,
+    paste: pasteClips,
+    duplicate: duplicateSelectedClips,
   };
 
-  const deleteSelectedClip = useCallback(() => {
-    if (!selectedClipId) {
+  const deleteSelectedClips = useCallback(() => {
+    if (selectedClipIds.length === 0) {
       setToast("Select a clip on the timeline first.");
       return;
     }
-    onRemoveClip(selectedClipId);
-  }, [selectedClipId, onRemoveClip]);
+    onRemoveClips(selectedClipIds);
+  }, [selectedClipIds, onRemoveClips]);
 
   const selectedMedia = media.find((m) => m.path === activeMediaPath) ?? null;
   /** Files the project remembers but cannot find. Said out loud rather
@@ -1116,28 +1168,62 @@ export function EditorShell({
       );
       if (!clip) continue;
 
+      // A clip that arrives with a transition fades in over the one it
+      // follows, not out of the backdrop — so while it is arriving, the
+      // clip before it stays on screen underneath, carrying on past its
+      // own end. Only when the two actually meet: across a gap there is
+      // nothing to fade from, and putting the earlier clip back would show
+      // something the edit had already left behind.
+      const arriving = holdForTransition(clip);
+      const held =
+        arriving > 0 && currentTime < clip.startSeconds + arriving
+          ? clipBefore(track.clips, clip)
+          : undefined;
+
       // A title has no file behind it, so it stands in as a still: silent,
       // with a picture, and with nothing to read a waveform from. Only the
       // drawing of it is different.
-      const item = isTextClip(clip)
-        ? ({
-            path: "",
-            name: clip.text?.content.split(String.fromCharCode(10))[0] || "Title",
-            kind: "image",
-            status: "ready",
-          } as MediaItem)
-        : mediaByPath.get(clip.mediaPath);
+      const item = isTextClip(clip) ? titleStandIn(clip) : mediaByPath.get(clip.mediaPath);
       if (!item) continue;
 
       // Sound or picture is the clip's own nature, not the lane's: a video
       // dragged onto an audio track is still a video, while the half that
       // Split Audio lifted off one stays sound wherever it is put.
       const audioOnly = Boolean(clip.soundOnly) || item.kind === "audio";
+
+      // Pushed first, so it sits under the clip arriving over it: layers
+      // at the same depth are stacked in the order they are drawn.
+      if (held && !audioOnly) {
+        const heldItem = isTextClip(held)
+          ? titleStandIn(held)
+          : mediaByPath.get(held.mediaPath);
+        if (heldItem) {
+          const framing = layerFramingAt(held, currentTime - held.startSeconds);
+          layers.push({
+            clip: held,
+            item: heldItem,
+            depth,
+            layout: framing.layout,
+            textLayout: layoutAt(held, currentTime - held.startSeconds),
+            opacity: framing.opacity,
+            holding: true,
+            movable: false,
+            audioOnly: false,
+          });
+        }
+      }
+
+      const framing = layerFramingAt(clip, currentTime - clip.startSeconds);
       layers.push({
         clip,
         item,
         depth: audioOnly ? 0 : depth,
-        layout: layoutAt(clip, currentTime - clip.startSeconds),
+        layout: framing.layout,
+        textLayout: layoutAt(clip, currentTime - clip.startSeconds),
+        // Sound is never faded by a transition, so a clip that is only
+        // heard is always fully there.
+        opacity: audioOnly ? 1 : framing.opacity,
+        holding: false,
         movable: !audioOnly,
         audioOnly,
       });
@@ -1163,6 +1249,8 @@ export function EditorShell({
         item: selectedMedia,
         depth: 0,
         layout: FULL_FRAME_LAYOUT,
+        opacity: 1,
+        holding: false,
         movable: false,
         audioOnly: selectedMedia.kind === "audio",
       },
@@ -1183,12 +1271,20 @@ export function EditorShell({
    * ending. The clock stops at each of these to let the stack be rebuilt,
    * which is what makes a clip on a second track appear partway through
    * the one underneath it. */
+  /** Every moment the stack of layers changes, so that playback can stop,
+   * rebuild it, and carry on from there. */
   const boundaries = useMemo(() => {
     const marks = new Set<number>();
     for (const track of tracks) {
       for (const clip of track.clips) {
         marks.add(clip.startSeconds);
         marks.add(clip.startSeconds + clip.durationSeconds);
+        // The end of a transition is a change of stack too: the clip it
+        // arrived over is finished with, and without a mark here it would
+        // stay mounted underneath for the whole of the clip that replaced
+        // it.
+        const arriving = holdForTransition(clip);
+        if (arriving > 0) marks.add(clip.startSeconds + arriving);
       }
     }
     return [...marks].sort((a, b) => a - b);
@@ -1222,13 +1318,22 @@ export function EditorShell({
       // into its file that is. The volume line is drawn against the clip,
       // so it is read with the former and the file seeked with the latter.
       const elapsed = Math.max(0, at - layer.clip.startSeconds);
-      const within = elapsed + (layer.clip.trimStartSeconds ?? 0);
+      const within = mediaTimeAt(layer.clip, elapsed);
+
+      // Played faster or slower, with the voice left alone: a recording
+      // run at double speed should take half the time, not rise an octave.
+      // Chromium keeps the pitch by default but says so only through this,
+      // and a browser that has never heard of it simply ignores it.
+      const speed = speedOf(layer.clip);
+      if (element.playbackRate !== speed) element.playbackRate = speed;
+      element.preservesPitch = true;
 
       // Read at the same moment as the picture, so a fade lands exactly
       // where it was drawn. Mute is folded in here rather than left to
       // `element.muted`, because a boosted element no longer plays through
       // its own volume at all.
       const silent =
+        layer.holding ||
         Boolean(layer.clip.muted) ||
         (!layer.audioOnly && Boolean(layer.clip.audioDetached));
       const wanted = silent ? 0 : gainAt(layer.clip.volume, elapsed);
@@ -1252,7 +1357,10 @@ export function EditorShell({
       // seek to; leave it holding its last frame.
       const duration = element.duration;
       if (Number.isFinite(duration) && duration > 0 && within >= duration) continue;
-      if (Math.abs(element.currentTime - within) > tolerance) {
+      // Drift is measured in the file's own seconds, and a clip running at
+      // four times speed covers four of them a second — so what counts as
+      // out of step grows with the speed.
+      if (Math.abs(element.currentTime - within) > tolerance * speed) {
         element.currentTime = within;
       }
     }
@@ -1352,6 +1460,62 @@ export function EditorShell({
     return () => observer.disconnect();
   }, [visualLayers.length]);
 
+  // A press anywhere else puts the frame menu away, the way every other
+  // menu in the app behaves.
+  useEffect(() => {
+    if (!shapeMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      const menu = (event.target as Element | null)?.closest?.(".ed-chipmenu");
+      if (!menu) setShapeMenuOpen(false);
+    };
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [shapeMenuOpen]);
+
+  // How much room the preview has been left. The frame is worked out from
+  // this rather than left to the layout, because the export needs the same
+  // arithmetic and CSS cannot be asked for its answer.
+  useEffect(() => {
+    const element = canvasRef.current;
+    if (!element) return;
+    // The content box: what is left inside the padding. `clientWidth`
+    // counts the padding as well, and a frame sized from that grew until
+    // it filled the very inset it was supposed to sit inside.
+    //
+    // Measured here and again on every resize. Relying on the observer
+    // alone left the preview at nothing at all whenever its first report
+    // did not arrive — a pane that is not being painted does not run the
+    // callback, though it will still answer a question about layout.
+    const measure = () => {
+      const style = getComputedStyle(element);
+      const inset = (side: string) => parseFloat(style.getPropertyValue(side)) || 0;
+      setPreviewArea({
+        width: element.clientWidth - inset("padding-left") - inset("padding-right"),
+        height: element.clientHeight - inset("padding-top") - inset("padding-bottom"),
+      });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  // The backdrop, painted by the same function that paints it for the
+  // export. Drawn at the device's own resolution so it is as crisp as the
+  // rest of the window on a scaled display.
+  useEffect(() => {
+    const canvas = backdropRef.current;
+    if (!canvas) return;
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.round(geometry.width * ratio));
+    const height = Math.max(1, Math.round(geometry.height * ratio));
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    drawBackdrop(ctx, { backdropKind, category, swatch }, width, height);
+  }, [geometry.width, geometry.height, backdropKind, category, swatch]);
+
   useEffect(() => {
     const element = tracksRef.current;
     if (!element) return;
@@ -1405,16 +1569,23 @@ export function EditorShell({
       timecodeRef.current.textContent = formatTimecode(at);
     }
 
-    // A clip that zooms is moved frame by frame here rather than through a
-    // render; one that holds still already sits where React put it.
+    // A clip that zooms, or that is arriving or leaving, is moved frame by
+    // frame here rather than through a render; one that holds still
+    // already sits where React put it.
     for (const layer of sceneRef.current.layers) {
-      if (layer.audioOnly || !layer.clip.layoutPoints?.length) continue;
-      const box = layerBoxes.current.get(layer.clip.id);
+      const clip = layer.clip;
+      const animated =
+        Boolean(clip.layoutPoints?.length) ||
+        Boolean(clip.transitionIn) ||
+        Boolean(clip.transitionOut);
+      if (layer.audioOnly || !animated) continue;
+      const box = layerBoxes.current.get(clip.id);
       if (!box) continue;
-      const framing = layoutAt(layer.clip, at - layer.clip.startSeconds);
-      box.style.width = `${framing.scale * 100}%`;
-      box.style.left = `${(0.5 + framing.x) * 100}%`;
-      box.style.top = `${(0.5 + framing.y) * 100}%`;
+      const framing = layerFramingAt(clip, at - clip.startSeconds);
+      box.style.width = `${framing.layout.scale * 100}%`;
+      box.style.left = `${(0.5 + framing.layout.x) * 100}%`;
+      box.style.top = `${(0.5 + framing.layout.y) * 100}%`;
+      box.style.opacity = `${framing.opacity}`;
     }
     if (!sceneRef.current.hasClips) return;
 
@@ -1519,6 +1690,74 @@ export function EditorShell({
     [patchSettings],
   );
 
+  /** How much of the slider one unit of a pinch is worth.
+   *
+   * A mouse wheel reports a notch as 100, which at this rate comes to the
+   * same 12.5 points the zoom buttons move by — so a notch and a press do
+   * the same thing. A trackpad reports a pinch as a stream of much smaller
+   * numbers, which at the same rate reads as a smooth zoom rather than a
+   * series of steps. The clamp is what keeps the two in proportion. */
+  const ZOOM_PER_WHEEL_UNIT = 0.25;
+  const ZOOM_PER_EVENT = 12.5;
+
+  /** The moment the pointer was over when a zoom began, and where on
+   * screen it was. Held so the view can be scrolled back afterwards to put
+   * that moment under the pointer again. */
+  const zoomAnchor = useRef<{ seconds: number; clientX: number } | null>(null);
+
+  // Pinching on a trackpad, or turning a wheel with Ctrl held, zooms the
+  // timeline rather than the whole page.
+  //
+  // Listened for on the element rather than through React, and marked as
+  // not passive: a passive listener may not call `preventDefault`, and
+  // without that the browser answers a pinch by scaling the entire app.
+  useEffect(() => {
+    const scroller = timelineScrollRef.current;
+    if (!scroller) return;
+
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+
+      // Some browsers report the turn in lines rather than pixels.
+      const units = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+      const change = Math.max(
+        -ZOOM_PER_EVENT,
+        Math.min(ZOOM_PER_EVENT, -units * ZOOM_PER_WHEEL_UNIT),
+      );
+      const now = settingsRef.current.timelineZoom;
+      const next = Math.min(100, Math.max(0, now + change));
+      if (next === now) return;
+
+      zoomAnchor.current = {
+        seconds: secondsAtPointerRef.current(event.clientX),
+        clientX: event.clientX,
+      };
+      patchSettings({ timelineZoom: next });
+    };
+
+    scroller.addEventListener("wheel", onWheel, { passive: false });
+    return () => scroller.removeEventListener("wheel", onWheel);
+  }, [patchSettings, showTimeline]);
+
+  // Zoom in on the middle of the view and the moment under the pointer
+  // slides away from it, which makes a pinch feel like it is fighting the
+  // hand doing it. Scrolled back here, once the new width is on screen, so
+  // the moment being pointed at stays under the pointer.
+  useLayoutEffect(() => {
+    const anchor = zoomAnchor.current;
+    zoomAnchor.current = null;
+    const scroller = timelineScrollRef.current;
+    if (!anchor || !scroller || timelineSeconds <= 0) return;
+
+    const viewLeft = scroller.getBoundingClientRect().left;
+    const along = (anchor.seconds / timelineSeconds) * trackWidth;
+    scroller.scrollLeft = Math.max(
+      0,
+      viewLeft + TRACK_LABEL_WIDTH + along - anchor.clientX,
+    );
+  }, [trackWidth, timelineSeconds]);
+
   function togglePlay() {
     if (!canPlay) {
       setToast(
@@ -1597,6 +1836,13 @@ export function EditorShell({
     },
     [trackWidth, timelineSeconds],
   );
+
+  /** Reached through a ref by the wheel listener, which is bound once for
+   * the life of the timeline rather than rebound on every change of
+   * scale — and a listener bound once would otherwise be holding the
+   * scale it was born with. */
+  const secondsAtPointerRef = useRef(secondsAtPointer);
+  secondsAtPointerRef.current = secondsAtPointer;
 
   /** Moves the playhead to a point on the timeline, bringing the preview
    * with it. Deliberately not `seekTo`: this one is clamped to the whole
@@ -1686,7 +1932,9 @@ export function EditorShell({
 
         const rate = source.peaks_per_second;
         const from = (clip.trimStartSeconds ?? 0) * rate;
-        const span = clip.durationSeconds * rate;
+        // How much of the file the clip covers, which is not its length on
+        // the timeline once its speed has been changed.
+        const span = mediaSpan(clip, clip.durationSeconds) * rate;
         const columns = Math.max(
           8,
           Math.min(WAVE_COLUMNS, Math.round(span)),
@@ -1723,14 +1971,14 @@ export function EditorShell({
    * playhead is standing inside it. */
   const zoomTarget =
     previewLayers.find(
-      (layer) => layer.movable && !layer.audioOnly && layer.clip.id === selectedClipId,
+      (layer) => layer.movable && !layer.audioOnly && selectedClipIds.includes(layer.clip.id),
     ) ?? null;
 
   /** The title being edited: whichever text clip is selected. */
   const selectedText =
     tracks
       .flatMap((track) => track.clips)
-      .find((clip) => clip.id === selectedClipId && clip.text) ?? null;
+      .find((clip) => selectedClipIds.includes(clip.id) && clip.text) ?? null;
 
   /** A track with nothing on it at this moment, preferred for a title: a
    * title is something laid over the picture, and dropping one onto busy
@@ -1824,7 +2072,7 @@ export function EditorShell({
     if (event.button !== 0 || pixelsPerSecond <= 0) return;
     event.preventDefault();
     event.stopPropagation();
-    onSelectClip(clip.id);
+    selectForGesture(clip.id, event);
 
     const ruler = rulerRef.current;
     if (!ruler) return;
@@ -2019,7 +2267,79 @@ export function EditorShell({
     return found;
   }, [tracks]);
 
+  /** The clips the transitions and speed tabs work on, and the first of
+   * them, which is what the controls read their settings from. */
+  const selectedClips = selectedClipIds
+    .map((id) => clipsById.get(id))
+    .filter((found): found is { clip: TimelineClip; track: TimelineTrack } => !!found);
+  const selectedClip = selectedClips[0] ?? null;
+  /** Whether they all say the same thing. When they do not, the panel
+   * shows nothing picked out rather than one clip's answer standing in
+   * for the rest. */
+  function agreeOn<T>(read: (clip: TimelineClip) => T): T | undefined {
+    if (selectedClips.length === 0) return undefined;
+    const first = JSON.stringify(read(selectedClips[0].clip) ?? null);
+    return selectedClips.every(
+      (found) => JSON.stringify(read(found.clip) ?? null) === first,
+    )
+      ? read(selectedClips[0].clip)
+      : undefined;
+  }
+  /** Sound has no picture to fade, so the tab says so rather than
+   * offering transitions that would do nothing. */
+  const selectedIsSound =
+    selectedClip != null &&
+    (Boolean(selectedClip.clip.soundOnly) ||
+      mediaByPath.get(selectedClip.clip.mediaPath)?.kind === "audio");
+  const agreedSpeed = agreeOn((clip) => speedOf(clip));
+  const speedMixed = selectedClips.length > 1 && agreedSpeed === undefined;
+  const selectedSpeed = agreedSpeed ?? (selectedClip ? speedOf(selectedClip.clip) : 1);
+  const selectedTransition = agreeOn((clip) =>
+    transitionEdge === "in" ? clip.transitionIn : clip.transitionOut,
+  );
+  /** Several clips picked out that do not all carry the same transition.
+   * Nothing is shown as chosen, because nothing is: picking one would set
+   * them all, and showing one clip's answer would suggest they agreed. */
+  const transitionMixed =
+    selectedClips.length > 1 &&
+    selectedTransition === undefined &&
+    selectedClips.some((found) =>
+      transitionEdge === "in" ? found.clip.transitionIn : found.clip.transitionOut,
+    );
+
+  /** What the clip in question would fade from, said plainly, because it
+   * is the one thing about transitions that is not obvious: a transition
+   * at the start of a clip needs something before it to come out of. */
+  const transitionSource =
+    selectedClip && transitionEdge === "in"
+      ? clipBefore(selectedClip.track.clips, selectedClip.clip)
+      : undefined;
+
+  function pickTransition(kind: TransitionKind | null) {
+    if (!selectedClip) return;
+    onSetTransition(
+      selectedClipIds,
+      transitionEdge,
+      kind === null ? undefined : { kind, seconds: transitionSecondsWanted },
+    );
+  }
+
   const menuTarget = clipMenu ? (clipsById.get(clipMenu.clipId) ?? null) : null;
+  /** What the clip menu acts on: the whole selection when the clip it was
+   * opened on is part of it, and that clip alone otherwise. */
+  const menuSelection = clipMenu
+    ? selectedClipIds.includes(clipMenu.clipId)
+      ? selectedClipIds
+      : [clipMenu.clipId]
+    : [];
+  // The track menu is put away the same way the clip menu is: by pressing
+  // anywhere that is not it.
+  useEffect(() => {
+    if (!trackMenu) return;
+    const close = () => setTrackMenu(null);
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [trackMenu]);
   /** A cut needs the playhead to be inside the clip, clear of both ends. */
   const canCutHere =
     menuTarget != null &&
@@ -2054,10 +2374,109 @@ export function EditorShell({
     };
   }, [clipMenu]);
 
+  /** What a press on a clip does to the selection.
+   *
+   * On its own it picks that clip out and drops everything else. Held with
+   * Ctrl (or Command) it adds the clip to what is already picked out, or
+   * takes it back out if it was in — the gesture everything from a file
+   * manager to a spreadsheet uses, so it needs no explaining.
+   */
+  function selectClip(
+    clipId: string,
+    modifiers?: { ctrlKey: boolean; metaKey: boolean },
+  ) {
+    const adding = Boolean(modifiers && (modifiers.ctrlKey || modifiers.metaKey));
+    if (!adding) {
+      onSelectClips([clipId]);
+      return;
+    }
+    onSelectClips(
+      selectedClipIds.includes(clipId)
+        ? selectedClipIds.filter((id) => id !== clipId)
+        : [...selectedClipIds, clipId],
+    );
+  }
+
+  /** A press on a clip that is already one of several picked out leaves
+   * the rest alone — otherwise dragging a group would drop all but the
+   * one under the pointer before the drag had begun. */
+  function selectForGesture(
+    clipId: string,
+    modifiers?: { ctrlKey: boolean; metaKey: boolean },
+  ) {
+    const adding = Boolean(modifiers && (modifiers.ctrlKey || modifiers.metaKey));
+    if (!adding && selectedClipIds.length > 1 && selectedClipIds.includes(clipId)) {
+      return;
+    }
+    selectClip(clipId, modifiers);
+  }
+
+  /** Drags a box across the timeline and picks out everything it touches.
+   *
+   * Started from the empty part of a lane, which until now did nothing but
+   * clear the selection — and still does, when it turns out to be a press
+   * rather than a drag.
+   *
+   * Which clips are caught is worked out from where they actually are on
+   * screen rather than from their times: a clip is a rectangle in a row,
+   * the box is a rectangle, and two rectangles either overlap or they do
+   * not. Nothing here has to know about zoom levels or scrolling.
+   */
+  function startMarquee(event: ReactPointerEvent<HTMLElement>) {
+    if (event.button !== 0) return;
+    const scroller = timelineScrollRef.current;
+    if (!scroller) return;
+
+    const origin = { x: event.clientX, y: event.clientY };
+    const already = event.ctrlKey || event.metaKey ? selectedClipIds : [];
+    // Measured once: a drag asks many times a second and the clips do not
+    // move while it is happening.
+    const boxes = [...scroller.querySelectorAll<HTMLElement>("[data-clip-id]")].map(
+      (element) => ({
+        id: element.dataset.clipId ?? "",
+        rect: element.getBoundingClientRect(),
+      }),
+    );
+
+    let dragged = false;
+    const onMove = (move: PointerEvent) => {
+      const left = Math.min(origin.x, move.clientX);
+      const top = Math.min(origin.y, move.clientY);
+      const width = Math.abs(move.clientX - origin.x);
+      const height = Math.abs(move.clientY - origin.y);
+      // A few pixels of wobble is a press, not a drag; without this a
+      // plain click on an empty lane would flicker a box.
+      if (!dragged && width < 4 && height < 4) return;
+      dragged = true;
+      setMarquee({ left, top, width, height });
+
+      const caught = boxes
+        .filter(
+          (box) =>
+            box.rect.left < left + width &&
+            box.rect.right > left &&
+            box.rect.top < top + height &&
+            box.rect.bottom > top,
+        )
+        .map((box) => box.id);
+      onSelectClips([...new Set([...already, ...caught])]);
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      setMarquee(null);
+      if (!dragged) onSelectClips(already);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
   function openClipMenu(event: ReactMouseEvent, clipId: string) {
     event.preventDefault();
     event.stopPropagation();
-    onSelectClip(clipId);
+    selectForGesture(clipId, event);
     setClipMenu({ clipId, x: event.clientX, y: event.clientY });
   }
 
@@ -2088,7 +2507,7 @@ export function EditorShell({
       window.addEventListener("pointerup", onClickUp);
       return;
     }
-    onSelectClip(layer.clip.id);
+    selectClip(layer.clip.id, event);
 
     const frame = stage.getBoundingClientRect();
     const start = layer.layout;
@@ -2222,7 +2641,7 @@ export function EditorShell({
     setIsDragging(true);
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData(CLIP_MIME, clip.id);
-    onSelectClip(clip.id);
+    selectForGesture(clip.id, e);
   }
 
   function handleLaneDragOver(e: DragEvent<HTMLElement>, trackId: string) {
@@ -2264,7 +2683,12 @@ export function EditorShell({
       (payload?.kind === "media" ? payload.mediaPath : "");
     endDrag();
 
-    if (clipId) onMoveClip(clipId, trackId, startSeconds);
+    if (clipId) {
+      // A clip that was part of a selection takes the rest with it; one
+      // that was not is moved on its own, and becomes the selection.
+      const moving = selectedClipIds.includes(clipId) ? selectedClipIds : [clipId];
+      onMoveClips(moveSelection(tracks, moving, clipId, trackId, startSeconds));
+    }
     else if (mediaPath) onAddClip(trackId, mediaPath, startSeconds);
   }
 
@@ -2309,28 +2733,28 @@ export function EditorShell({
         },
         {
           label: "Cut",
-          onClick: () => copySelectedClip(true),
+          onClick: () => copySelectedClips(true),
           shortcut: "Ctrl+X",
-          disabled: !selectedClipId,
+          disabled: selectedClipIds.length === 0,
           separatorBefore: true,
         },
         {
           label: "Copy",
-          onClick: () => copySelectedClip(false),
+          onClick: () => copySelectedClips(false),
           shortcut: "Ctrl+C",
-          disabled: !selectedClipId,
+          disabled: selectedClipIds.length === 0,
         },
         {
           label: "Paste",
-          onClick: pasteClip,
+          onClick: pasteClips,
           shortcut: "Ctrl+V",
-          disabled: !clipboardHasClip,
+          disabled: clipboardCount === 0,
         },
         {
           label: "Duplicate",
-          onClick: duplicateSelectedClip,
+          onClick: duplicateSelectedClips,
           shortcut: "Ctrl+D",
-          disabled: !selectedClipId,
+          disabled: selectedClipIds.length === 0,
         },
         {
           label: "Cut at Playhead",
@@ -2341,11 +2765,11 @@ export function EditorShell({
         {
           // This one does work now, so it gets to advertise its key.
           label: "Delete Clip",
-          onClick: deleteSelectedClip,
+          onClick: deleteSelectedClips,
           shortcut: "Del",
           // Greyed out with nothing selected, like Cut, Copy and
           // Duplicate above it.
-          disabled: !selectedClipId,
+          disabled: selectedClipIds.length === 0,
           separatorBefore: true,
         },
         { label: "Add Track", onClick: onAddTrack },
@@ -2372,11 +2796,10 @@ export function EditorShell({
     },
   ];
 
-  const backdrop = backdropFor(backdropKind, category, swatch);
   const stageStyle: CSSProperties = {
-    ["--ed-backdrop" as string]: backdrop,
-    ["--ed-pad" as string]: `${padding}px`,
-    ["--ed-radius" as string]: `${rounded}px`,
+    ["--ed-radius" as string]: `${geometry.radius}px`,
+    width: `${geometry.width}px`,
+    height: `${geometry.height}px`,
   };
 
   // Tick every 1/2/5/10/… seconds — whichever keeps the labels far enough
@@ -2464,11 +2887,45 @@ export function EditorShell({
                 <Icon name="crop" />
                 <span>Crop</span>
               </button>
-              <button className="ed-chipbtn" onClick={() => comingSoon("Frame")}>
-                <Icon name="frame" />
-                <span>Frame</span>
-                <Icon name="chevron" className="ed-caret" />
-              </button>
+              <div className="ed-chipmenu">
+                <button
+                  className="ed-chipbtn"
+                  title="The shape of the picture, in the preview and in the exported file"
+                  aria-haspopup="menu"
+                  aria-expanded={shapeMenuOpen}
+                  onClick={() => setShapeMenuOpen((open) => !open)}
+                >
+                  <Icon name="frame" />
+                  <span>{aspect}</span>
+                  <Icon name="chevron" className="ed-caret" />
+                </button>
+                {shapeMenuOpen && (
+                  <div className="ed-chipmenu-list" role="menu">
+                    {FRAME_SHAPES.map((shape) => (
+                      <button
+                        key={shape}
+                        className={`ed-chipmenu-item ${aspect === shape ? "is-active" : ""}`}
+                        role="menuitemradio"
+                        aria-checked={aspect === shape}
+                        onClick={() => {
+                          patchSettings({ aspect: shape });
+                          setShapeMenuOpen(false);
+                        }}
+                      >
+                        <span
+                          className="ed-shape-art"
+                          style={{ aspectRatio: shape.replace(":", " / ") }}
+                          aria-hidden="true"
+                        />
+                        <span className="ed-chipmenu-name">
+                          {FRAME_SHAPE_LABELS[shape]}
+                        </span>
+                        <span className="ed-chipmenu-note">{shape}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <button
                 className="ed-chipbtn"
                 title="Put a title on the timeline at the playhead"
@@ -2504,16 +2961,19 @@ export function EditorShell({
           </div>
 
           {/* preview canvas */}
-          <div className="ed-canvas">
+          <div className="ed-canvas" ref={canvasRef}>
             <div
               className={`ed-backdrop ${framed ? "" : "is-empty"}`}
               style={stageStyle}
               onPointerDown={(e) => {
                 // Pressing the backdrop itself, clear of every layer,
                 // drops the selection.
-                if (e.target === e.currentTarget) onSelectClip(null);
+                if (e.target === e.currentTarget) onSelectClips([]);
               }}
             >
+              {framed && hasBackdrop(backdropKind) && (
+                <canvas className="ed-backdrop-paint" ref={backdropRef} />
+              )}
               {audioCard ? (
                 <div className="ed-audio-stage">
                   <Icon name="speaker" className="ed-audio-glyph" />
@@ -2560,12 +3020,22 @@ export function EditorShell({
                 // The stack. Layers are drawn in track order, so a clip on
                 // a lower track in the list lies over the ones above it,
                 // and each is placed by its own layout rather than filling
-                // the frame. Their coordinates are fractions of this frame
-                // — the backdrop's padded inside — so the same layout
-                // means the same picture at any window size.
-                <div className="ed-stage-frame" ref={stageRef}>
+                // the frame. Their coordinates are fractions of the stage
+                // — the picture inside the padding — so the same layout
+                // means the same picture at any size, on screen or in the
+                // finished file.
+                <div
+                  className="ed-stage-frame"
+                  ref={stageRef}
+                  style={{
+                    left: `${geometry.stage.x}px`,
+                    top: `${geometry.stage.y}px`,
+                    width: `${geometry.stage.width}px`,
+                    height: `${geometry.stage.height}px`,
+                  }}
+                >
                   {visualLayers.map((layer) => {
-                    const selected = layer.clip.id === selectedClipId;
+                    const selected = selectedClipIds.includes(layer.clip.id);
                     return (
                       <div
                         key={layer.clip.id}
@@ -2575,34 +3045,28 @@ export function EditorShell({
                         ref={layerBoxRef(layer.clip.id)}
                         style={{
                           zIndex: layer.depth + 1,
-                          // A title's canvas covers the frame and the words
-                          // are placed inside it, so the box itself never
-                          // moves — that is what keeps the preview and the
-                          // export the same drawing.
-                          width: isTextClip(layer.clip)
-                            ? "100%"
-                            : `${layer.layout.scale * 100}%`,
-                          left: isTextClip(layer.clip)
-                            ? "50%"
-                            : `${(0.5 + layer.layout.x) * 100}%`,
-                          top: isTextClip(layer.clip)
-                            ? "50%"
-                            : `${(0.5 + layer.layout.y) * 100}%`,
+                          opacity: layer.opacity,
+                          width: `${layer.layout.scale * 100}%`,
+                          left: `${(0.5 + layer.layout.x) * 100}%`,
+                          top: `${(0.5 + layer.layout.y) * 100}%`,
                           // Its own shape, so an overlay isn't letterboxed
-                          // inside a box of the wrong proportions.
+                          // inside a box of the wrong proportions. A title's
+                          // drawing covers the whole stage, so its shape is
+                          // the stage's — which is what lets a transition
+                          // move and scale it like any other layer while the
+                          // words stay where they were placed inside it.
                           aspectRatio: isTextClip(layer.clip)
-                            ? undefined
+                            ? aspect.replace(":", " / ")
                             : layer.item.width && layer.item.height
                               ? `${layer.item.width} / ${layer.item.height}`
                               : "16 / 9",
-                          height: isTextClip(layer.clip) ? "100%" : undefined,
                         }}
                         onPointerDown={(e) => startLayerGesture(e, layer, "move")}
                       >
                         {layer.clip.text ? (
                           <TextLayerCanvas
                             text={layer.clip.text}
-                            layout={layer.layout}
+                            layout={layer.textLayout ?? layer.layout}
                             width={frameSize.width}
                             height={frameSize.height}
                           />
@@ -2643,11 +3107,13 @@ export function EditorShell({
                               }
                               // The clock is the authority on where we are;
                               // a freshly loaded file always says zero.
-                              const within =
+                              const within = mediaTimeAt(
+                                layer.clip,
                                 Math.max(
                                   0,
                                   clockRef.current.at - layer.clip.startSeconds,
-                                ) + (layer.clip.trimStartSeconds ?? 0);
+                                ),
+                              );
                               if (within > 0.05) v.currentTime = within;
                             }}
                           />
@@ -2914,6 +3380,241 @@ export function EditorShell({
                 </>
               )}
 
+              {activeTab === "speed" && (
+                <>
+                  <div className="ed-section-head">
+                    <h3 className="ed-section-title">Speed</h3>
+                  </div>
+
+                  {!selectedClip ? (
+                    <div className="ed-medialist-empty">
+                      <p>Select a clip on the timeline to change how fast it plays.</p>
+                    </div>
+                  ) : isTextClip(selectedClip.clip) ? (
+                    <div className="ed-medialist-empty">
+                      <p>
+                        A title has no material to play through, so there is
+                        nothing to speed up. Drag its edges to change how long
+                        it stays on screen.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="ed-speeds">
+                        {SPEED_PRESETS.map((preset) => (
+                          <button
+                            key={preset}
+                            className={`ed-speed ${
+                              !speedMixed && Math.abs(selectedSpeed - preset) < 0.001
+                                ? "is-active"
+                                : ""
+                            }`}
+                            aria-pressed={
+                              !speedMixed && Math.abs(selectedSpeed - preset) < 0.001
+                            }
+                            onClick={() => onSetSpeed(selectedClipIds, preset)}
+                          >
+                            {formatSpeed(preset)}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="ed-field">
+                        <label className="ed-field-label" htmlFor="ed-speed">
+                          Speed
+                          <span className="ed-field-value">
+                            {speedMixed ? "mixed" : formatSpeed(selectedSpeed)}
+                          </span>
+                        </label>
+                        <input
+                          id="ed-speed"
+                          className="ed-range"
+                          type="range"
+                          min={MIN_SPEED}
+                          max={MAX_SPEED}
+                          step={0.05}
+                          value={selectedSpeed}
+                          style={{
+                            ["--ed-fill" as string]: `${
+                              ((selectedSpeed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)) * 100
+                            }%`,
+                          }}
+                          onChange={(e) =>
+                            onSetSpeed(selectedClipIds, Number(e.currentTarget.value))
+                          }
+                        />
+                      </div>
+
+                      <p className="ed-note">
+                        {selectedClips.length > 1 ? (
+                          <>
+                            {countedClips(selectedClips.length)} picked out; a speed
+                            chosen here is given to all of them.
+                          </>
+                        ) : (
+                          <>
+                            {formatDuration(
+                              mediaSpan(
+                                selectedClip.clip,
+                                selectedClip.clip.durationSeconds,
+                              ),
+                            )}{" "}
+                            of footage in{" "}
+                            {formatDuration(selectedClip.clip.durationSeconds)} on the
+                            timeline.
+                          </>
+                        )}{" "}
+                        Whatever follows on the same track moves along, so the change
+                        leaves neither a gap nor an overlap.
+                      </p>
+                      <p className="ed-note">
+                        The sound speeds up with the picture but keeps its own
+                        voice — nothing rises or drops in pitch.
+                      </p>
+                    </>
+                  )}
+                </>
+              )}
+
+              {activeTab === "transitions" && (
+                <>
+                  <div className="ed-section-head">
+                    <h3 className="ed-section-title">Transitions</h3>
+                  </div>
+
+                  {!selectedClip ? (
+                    <div className="ed-medialist-empty">
+                      <p>
+                        Select a clip on the timeline to choose how it arrives
+                        and how it leaves.
+                      </p>
+                    </div>
+                  ) : selectedIsSound ? (
+                    // Said rather than quietly offered: a transition is a
+                    // thing that happens to a picture, and putting one on a
+                    // sound would look like it had been applied.
+                    <div className="ed-medialist-empty">
+                      <p>
+                        This clip is sound, and a transition shapes a picture.
+                        Use the volume line along the clip to fade it in or out.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="ed-segmented" role="group" aria-label="Which end">
+                        <button
+                          className={`ed-segment ${transitionEdge === "in" ? "is-active" : ""}`}
+                          aria-pressed={transitionEdge === "in"}
+                          onClick={() => setTransitionEdge("in")}
+                        >
+                          Arrives
+                        </button>
+                        <button
+                          className={`ed-segment ${transitionEdge === "out" ? "is-active" : ""}`}
+                          aria-pressed={transitionEdge === "out"}
+                          onClick={() => setTransitionEdge("out")}
+                        >
+                          Leaves
+                        </button>
+                      </div>
+
+                      <div className="ed-field">
+                        <label className="ed-field-label" htmlFor="ed-transition-length">
+                          Length
+                          <span className="ed-field-value">
+                            {(
+                              selectedTransition
+                                ? transitionSecondsOf(
+                                    selectedTransition,
+                                    selectedClip.clip.durationSeconds,
+                                  )
+                                : transitionSecondsWanted
+                            ).toFixed(2)}
+                            s
+                          </span>
+                        </label>
+                        <input
+                          id="ed-transition-length"
+                          className="ed-range"
+                          type="range"
+                          min={MIN_TRANSITION_SECONDS}
+                          max={MAX_TRANSITION_SECONDS}
+                          step={0.05}
+                          value={selectedTransition?.seconds ?? transitionSecondsWanted}
+                          style={{
+                            ["--ed-fill" as string]: `${
+                              (((selectedTransition?.seconds ?? transitionSecondsWanted) -
+                                MIN_TRANSITION_SECONDS) /
+                                (MAX_TRANSITION_SECONDS - MIN_TRANSITION_SECONDS)) *
+                              100
+                            }%`,
+                          }}
+                          onChange={(e) => {
+                            const seconds = Number(e.currentTarget.value);
+                            setTransitionSecondsWanted(seconds);
+                            if (selectedTransition) {
+                              onSetTransition(selectedClipIds, transitionEdge, {
+                                ...selectedTransition,
+                                seconds,
+                              });
+                            }
+                          }}
+                        />
+                      </div>
+
+                      <div className="ed-transitions">
+                        <button
+                          className={`ed-transition ${
+                            !selectedTransition && !transitionMixed ? "is-active" : ""
+                          }`}
+                          aria-pressed={!selectedTransition && !transitionMixed}
+                          onClick={() => pickTransition(null)}
+                        >
+                          <span className="ed-transition-art is-cut" aria-hidden="true" />
+                          <span>Cut</span>
+                        </button>
+                        {TRANSITIONS.map((kind) => (
+                          <button
+                            key={kind}
+                            className={`ed-transition ${
+                              !transitionMixed && selectedTransition?.kind === kind
+                                ? "is-active"
+                                : ""
+                            }`}
+                            aria-pressed={
+                              !transitionMixed && selectedTransition?.kind === kind
+                            }
+                            onClick={() => pickTransition(kind)}
+                          >
+                            <span
+                              className={`ed-transition-art is-${kind}`}
+                              aria-hidden="true"
+                            />
+                            <span>{TRANSITION_LABELS[kind]}</span>
+                          </button>
+                        ))}
+                      </div>
+
+                      {selectedClips.length > 1 && (
+                        <p className="ed-note">
+                          {countedClips(selectedClips.length)} picked out; a choice
+                          here is given to all of them.
+                        </p>
+                      )}
+                      <p className="ed-note">
+                        {transitionEdge === "in"
+                          ? transitionSource
+                            ? "It comes out of the clip before it, which keeps playing underneath while it arrives."
+                            : "There is no clip before this one, so it comes out of the background."
+                          : "It goes back to whatever is underneath — the background, or a clip on a lower track."}{" "}
+                        Sound is not faded: the volume line on the timeline is
+                        where a sound is shaped.
+                      </p>
+                    </>
+                  )}
+                </>
+              )}
+
               {activeTab === "text" && (
                 <>
                   <div className="ed-section-head">
@@ -3126,7 +3827,8 @@ export function EditorShell({
                   </div>
 
                   <p className="ed-note">
-                    Background, padding and corners affect this preview.
+                    Background, padding and corners are part of the picture:
+                    what you see here is what gets exported.
                   </p>
                 </>
               )}
@@ -3146,14 +3848,14 @@ export function EditorShell({
             className="ed-timeline-scroll"
             ref={timelineScrollRef}
             onClick={(e) => {
-              if (e.target === e.currentTarget) onSelectClip(null);
+              if (e.target === e.currentTarget) onSelectClips([]);
             }}
           >
             <div
               className="ed-timeline-inner"
               style={{ width: TRACK_LABEL_WIDTH + trackWidth }}
               onClick={(e) => {
-                if (e.target === e.currentTarget) onSelectClip(null);
+                if (e.target === e.currentTarget) onSelectClips([]);
               }}
             >
               <div className="ed-rulerrow">
@@ -3192,6 +3894,11 @@ export function EditorShell({
                       className={`ed-tracklabel ${isAudioTrack ? "is-audio" : ""} ${
                         resizingTrackId === track.id ? "is-resizing" : ""
                       }`}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setClipMenu(null);
+                        setTrackMenu({ trackId: track.id, x: e.clientX, y: e.clientY });
+                      }}
                     >
                       <span className="ed-tracklabel-icons">
                         {trackContents.get(track.id)?.picture && (
@@ -3201,9 +3908,36 @@ export function EditorShell({
                           <Icon name="speaker" className="ed-icon-audio" />
                         )}
                       </span>
-                      <span className="ed-tracklabel-name" title={track.name}>
-                        {track.name}
-                      </span>
+                      {renamingTrackId === track.id ? (
+                        <input
+                          className="ed-tracklabel-input"
+                          defaultValue={track.name}
+                          autoFocus
+                          aria-label={`Name for ${track.name}`}
+                          onFocus={(e) => e.currentTarget.select()}
+                          onBlur={(e) => {
+                            onRenameTrack(track.id, e.currentTarget.value);
+                            setRenamingTrackId(null);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") e.currentTarget.blur();
+                            if (e.key === "Escape") {
+                              // Put back what it was, then let go.
+                              e.currentTarget.value = track.name;
+                              e.currentTarget.blur();
+                            }
+                            e.stopPropagation();
+                          }}
+                        />
+                      ) : (
+                        <span
+                          className="ed-tracklabel-name"
+                          title={`${track.name} — double-click to rename`}
+                          onDoubleClick={() => setRenamingTrackId(track.id)}
+                        >
+                          {track.name}
+                        </span>
+                      )}
                       <button
                         className="ed-trackzoom"
                         title={
@@ -3264,8 +3998,8 @@ export function EditorShell({
                         );
                       }}
                       onDrop={(e) => handleLaneDrop(e, track.id)}
-                      onClick={(e) => {
-                        if (e.target === e.currentTarget) onSelectClip(null);
+                      onPointerDown={(e) => {
+                        if (e.target === e.currentTarget) startMarquee(e);
                       }}
                     >
                       {track.clips.length === 0 && !isTarget && (
@@ -3283,7 +4017,7 @@ export function EditorShell({
                         const label = clip.text
                           ? clip.text.content.split(String.fromCharCode(10))[0] || "Title"
                           : (item?.name ?? fileName(clip.mediaPath));
-                        const isSelected = clip.id === selectedClipId;
+                        const isSelected = selectedClipIds.includes(clip.id);
                         // Stills have nothing to hear; a clip whose sound
                         // has moved to an audio track has nothing left to
                         // set the level of either.
@@ -3344,13 +4078,14 @@ Right-click for audio options`}
                             draggable={
                               volumeClipId !== clip.id && trimmingClipId !== clip.id
                             }
+                            data-clip-id={clip.id}
                             onDragStart={(e) => handleClipDragStart(e, clip)}
                             onDragEnd={endDrag}
-                            onClick={() => onSelectClip(clip.id)}
+                            onClick={(e) => selectClip(clip.id, e)}
                             onKeyDown={(e) => {
                               if (e.key === "Enter" || e.key === " ") {
                                 e.preventDefault();
-                                onSelectClip(clip.id);
+                                selectClip(clip.id, e);
                               }
                             }}
                           >
@@ -3478,7 +4213,7 @@ Right-click for audio options`}
                                     onPointerDown={(e) => {
                                       e.preventDefault();
                                       e.stopPropagation();
-                                      onSelectClip(clip.id);
+                                      selectClip(clip.id);
                                       scrubTo(clip.startSeconds + point.at);
                                     }}
                                     onDoubleClick={(e) => {
@@ -3490,6 +4225,39 @@ Right-click for audio options`}
                                 ))}
                               </span>
                             ) : null}
+
+                            {/* A wedge on whichever edge carries a
+                                transition, as wide as the transition is
+                                long — so its length can be seen against
+                                the clip rather than only read in a panel. */}
+                            {clip.transitionIn && (
+                              <span
+                                className="ed-clip-transition is-start"
+                                style={{
+                                  width: timeToPixels(
+                                    transitionSecondsOf(
+                                      clip.transitionIn,
+                                      clip.durationSeconds,
+                                    ),
+                                  ),
+                                }}
+                                title={`Arrives: ${TRANSITION_LABELS[clip.transitionIn.kind]}`}
+                              />
+                            )}
+                            {clip.transitionOut && (
+                              <span
+                                className="ed-clip-transition is-end"
+                                style={{
+                                  width: timeToPixels(
+                                    transitionSecondsOf(
+                                      clip.transitionOut,
+                                      clip.durationSeconds,
+                                    ),
+                                  ),
+                                }}
+                                title={`Leaves: ${TRANSITION_LABELS[clip.transitionOut.kind]}`}
+                              />
+                            )}
 
                             {trimmable && (
                               <>
@@ -3604,6 +4372,47 @@ Right-click for audio options`}
         </footer>
       )}
 
+      {trackMenu && (
+        <div
+          className="ed-clipmenu"
+          role="menu"
+          style={{
+            left: Math.min(trackMenu.x, window.innerWidth - 190),
+            top: Math.min(trackMenu.y, window.innerHeight - 96),
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
+            onClick={() => {
+              setRenamingTrackId(trackMenu.trackId);
+              setTrackMenu(null);
+            }}
+          >
+            <Icon name="pencil" />
+            <span>Rename</span>
+          </button>
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
+            disabled={tracks.length <= 1}
+            title={
+              tracks.length <= 1
+                ? "There has to be somewhere to put a clip"
+                : "Remove this track and everything on it"
+            }
+            onClick={() => {
+              onRemoveTrack(trackMenu.trackId);
+              setTrackMenu(null);
+            }}
+          >
+            <Icon name="trash" />
+            <span>Delete track</span>
+          </button>
+        </div>
+      )}
+
       {clipMenu && menuTarget && (
         <div
           className="ed-clipmenu"
@@ -3632,7 +4441,46 @@ Right-click for audio options`}
           >
             <Icon name="scissors" />
             <span>Cut Here</span>
+            <span className="ed-clipmenu-key">Ctrl+K</span>
           </button>
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
+            onClick={() => {
+              onCopyClips(menuSelection);
+              setToast(`${countedClips(menuSelection.length)} copied.`);
+              setClipMenu(null);
+            }}
+          >
+            <Icon name="clips" />
+            <span>Copy</span>
+            <span className="ed-clipmenu-key">Ctrl+C</span>
+          </button>
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
+            onClick={() => {
+              onDuplicateClips(menuSelection);
+              setClipMenu(null);
+            }}
+          >
+            <Icon name="plus" />
+            <span>Duplicate</span>
+            <span className="ed-clipmenu-key">Ctrl+D</span>
+          </button>
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
+            onClick={() => {
+              onRemoveClips(menuSelection);
+              setClipMenu(null);
+            }}
+          >
+            <Icon name="trash" />
+            <span>Delete</span>
+            <span className="ed-clipmenu-key">Del</span>
+          </button>
+          <div className="ed-clipmenu-rule" />
           <button
             className="ed-clipmenu-item"
             role="menuitem"
@@ -3664,6 +4512,18 @@ Right-click for audio options`}
             <span>Split Audio</span>
           </button>
         </div>
+      )}
+
+      {marquee && (
+        <div
+          className="ed-marquee"
+          style={{
+            left: marquee.left,
+            top: marquee.top,
+            width: marquee.width,
+            height: marquee.height,
+          }}
+        />
       )}
 
       {toast && <div className="editor-toast">{toast}</div>}

@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::process::Stdio;
+use tauri::Manager;
 
 /// How many readings a second the timeline gets. Enough to see the shape
 /// of speech — where a sentence starts, where a pause is — without making
@@ -24,10 +25,143 @@ pub struct AudioPeaks {
     pub peaks: Vec<u8>,
 }
 
-pub fn read(path: &str) -> Result<AudioPeaks, String> {
+/* ----------------------------------------------------------------- cache */
+
+/// The stored envelope starts with this, so a file left behind by an older
+/// version of the app is recognised as unreadable rather than decoded as
+/// if it were the current shape.
+const CACHE_MAGIC: &[u8; 4] = b"JDPK";
+const CACHE_VERSION: u8 = 1;
+
+/// How many envelopes are kept. Each is about 100KB for an hour of audio,
+/// so this is a few megabytes at worst — and a project of twenty clips
+/// still finds all of its own.
+const CACHE_LIMIT: usize = 200;
+
+/// What the stored envelope is filed under: the path, and how big the file
+/// is and when it last changed.
+///
+/// The size and the date are what make it safe. A file that has been
+/// re-recorded, re-encoded or trimmed since keeps its path, and an
+/// envelope drawn from the old one would be a waveform that no longer
+/// matches a sound — so any of the three changing means it is read again.
+fn cache_key(path: &str) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let data = std::fs::metadata(path).ok()?;
+    let changed = data
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.to_lowercase().hash(&mut hasher);
+    data.len().hash(&mut hasher);
+    changed.hash(&mut hasher);
+    Some(format!("{:016x}", hasher.finish()))
+}
+
+fn cache_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    let dir = app.path().app_cache_dir().ok()?.join("waveforms");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Magic, version, the readings a second, then the readings themselves.
+///
+/// One byte a reading, as they are held: an hour of audio is about 108KB
+/// stored this way, against roughly 400KB written out as numbers in a text
+/// file — and the whole point of storing it is to spare the disk work.
+fn encode_cache(peaks: &AudioPeaks) -> Option<Vec<u8>> {
+    // A rate that will not fit in the one byte kept for it would be read
+    // back as something else entirely, so it is simply not stored.
+    let rate = u8::try_from(peaks.peaks_per_second).ok()?;
+    let mut bytes = Vec::with_capacity(peaks.peaks.len() + 6);
+    bytes.extend_from_slice(CACHE_MAGIC);
+    bytes.push(CACHE_VERSION);
+    bytes.push(rate);
+    bytes.extend_from_slice(&peaks.peaks);
+    Some(bytes)
+}
+
+fn decode_cache(bytes: &[u8]) -> Option<AudioPeaks> {
+    if bytes.len() < 6 || &bytes[0..4] != CACHE_MAGIC || bytes[4] != CACHE_VERSION {
+        return None;
+    }
+    Some(AudioPeaks {
+        peaks_per_second: bytes[5] as usize,
+        peaks: bytes[6..].to_vec(),
+    })
+}
+
+fn load_cached(app: &tauri::AppHandle, key: &str) -> Option<AudioPeaks> {
+    let file = cache_dir(app)?.join(format!("{key}.pk"));
+    decode_cache(&std::fs::read(&file).ok()?)
+}
+
+fn store_cached(app: &tauri::AppHandle, key: &str, peaks: &AudioPeaks) {
+    let Some(dir) = cache_dir(app) else { return };
+    let Some(bytes) = encode_cache(peaks) else { return };
+
+    // Written whole and moved into place, so a half-written file is never
+    // left behind to be read as an envelope.
+    let file = dir.join(format!("{key}.pk"));
+    let pending = dir.join(format!("{key}.part"));
+    if std::fs::write(&pending, &bytes).is_ok() {
+        let _ = std::fs::rename(&pending, &file);
+    }
+    prune(&dir);
+}
+
+/// Keeps the folder from growing without end: once there are more than it
+/// should hold, the ones touched longest ago go.
+fn prune(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let when = entry.metadata().ok()?.modified().ok()?;
+            Some((when, entry.path()))
+        })
+        .collect();
+    if files.len() <= CACHE_LIMIT {
+        return;
+    }
+    files.sort_by_key(|(when, _)| *when);
+    for (_, path) in files.iter().take(files.len() - CACHE_LIMIT) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The loudness envelope of a file, read from the file itself the first
+/// time and from the store after that.
+///
+/// Decoding is the expensive part — an hour of audio is an hour of
+/// samples to walk through, and it was being done afresh every time a
+/// project was opened, for every clip in it. The envelope only depends on
+/// the file, so once drawn it need never be drawn again.
+pub fn read(app: &tauri::AppHandle, path: &str) -> Result<AudioPeaks, String> {
     if !std::path::Path::new(path).exists() {
         return Err("File not found".to_string());
     }
+
+    let key = cache_key(path);
+    if let Some(key) = key.as_deref() {
+        if let Some(stored) = load_cached(app, key) {
+            return Ok(stored);
+        }
+    }
+
+    let peaks = decode(path)?;
+    if let Some(key) = key.as_deref() {
+        store_cached(app, key, &peaks);
+    }
+    Ok(peaks)
+}
+
+fn decode(path: &str) -> Result<AudioPeaks, String> {
 
     let mut child = crate::sidecar::command("ffmpeg")
         .args([
@@ -167,7 +301,7 @@ mod tests {
             eprintln!("JD_TEST_CLIP not set; skipping");
             return;
         };
-        let result = super::read(&path).expect("peaks");
+        let result = super::decode(&path).expect("peaks");
         let seconds = result.peaks.len() as f64 / result.peaks_per_second as f64;
         let loudest = result.peaks.iter().copied().max().unwrap_or(0);
         let quietest = result.peaks.iter().copied().min().unwrap_or(0);
@@ -184,5 +318,85 @@ mod tests {
         assert!(result.peaks.len() > 100, "too few readings");
         assert!(loudest > 0, "every reading was silence");
         assert!(loudest > quietest, "the envelope never changes");
+    }
+
+    /// The stored shape, there and back again. Everything about the store
+    /// rests on this: an envelope that comes back different from the one
+    /// that went in would draw a waveform that belongs to no sound.
+    #[test]
+    fn a_stored_envelope_comes_back_as_it_went_in() {
+        let peaks = super::AudioPeaks {
+            peaks_per_second: 30,
+            peaks: (0..5_000).map(|i| (i % 256) as u8).collect(),
+        };
+        let bytes = super::encode_cache(&peaks).expect("encoded");
+        let back = super::decode_cache(&bytes).expect("decoded");
+        assert_eq!(back.peaks_per_second, peaks.peaks_per_second);
+        assert_eq!(back.peaks, peaks.peaks);
+        // A minute of sound in a little under two kilobytes.
+        assert!(bytes.len() < peaks.peaks.len() + 16, "the store is not compact");
+    }
+
+    #[test]
+    fn a_file_from_another_version_is_not_read_as_an_envelope() {
+        let peaks = super::AudioPeaks { peaks_per_second: 30, peaks: vec![1, 2, 3] };
+        let good = super::encode_cache(&peaks).expect("encoded");
+
+        assert!(super::decode_cache(&[]).is_none(), "nothing is not an envelope");
+        assert!(
+            super::decode_cache(b"not an envelope at all").is_none(),
+            "a file that is not one of ours should be refused"
+        );
+        let mut older = good.clone();
+        older[4] = 0;
+        assert!(
+            super::decode_cache(&older).is_none(),
+            "a file from an older version should be refused rather than misread"
+        );
+        let mut truncated = good.clone();
+        truncated.truncate(3);
+        assert!(super::decode_cache(&truncated).is_none(), "a stub is not an envelope");
+    }
+
+    /// The same file gives the same name to file it under; a file that has
+    /// changed since does not, so the envelope is drawn afresh.
+    #[test]
+    fn the_key_follows_the_file_rather_than_its_name() {
+        let path = std::env::temp_dir().join("jd-key-test.bin");
+        std::fs::write(&path, vec![0u8; 1000]).expect("written");
+        let name = path.to_string_lossy().to_string();
+
+        let first = super::cache_key(&name).expect("a key");
+        assert_eq!(first, super::cache_key(&name).expect("a key"), "asking twice");
+
+        // Re-recorded at a different length: the same path, a different file.
+        std::fs::write(&path, vec![0u8; 2000]).expect("written");
+        assert_ne!(
+            first,
+            super::cache_key(&name).expect("a key"),
+            "a file that has changed must not be given the old envelope"
+        );
+
+        assert!(
+            super::cache_key("nothing-is-here.bin").is_none(),
+            "a file that is not there has no key"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The folder is kept to a size. Without this every file ever opened
+    /// would leave something behind for good.
+    #[test]
+    fn the_store_is_kept_to_a_size() {
+        let dir = std::env::temp_dir().join("jd-prune-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("made");
+        for i in 0..(super::CACHE_LIMIT + 25) {
+            std::fs::write(dir.join(format!("{i}.pk")), b"x").expect("written");
+        }
+        super::prune(&dir);
+        let left = std::fs::read_dir(&dir).expect("read").count();
+        assert_eq!(left, super::CACHE_LIMIT, "left {left} behind");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

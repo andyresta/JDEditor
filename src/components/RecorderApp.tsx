@@ -15,9 +15,11 @@ import { ExportDialog } from "./ExportDialog";
 import {
   buildExportPlan,
   exportCanvas,
+  renderBackdrop,
   renderTitles,
   timelineDuration,
 } from "../export";
+import { frameGeometry } from "../frame";
 import { Launcher } from "./Launcher";
 import { RecordingsList } from "./RecordingsList";
 import {
@@ -38,6 +40,7 @@ import {
   ProjectFile,
   fromRelativeMediaPath,
   mediaFileName,
+  folderOf,
   toRelativeMediaPath,
   QUALITY_LABELS,
   QualityPreset,
@@ -46,12 +49,23 @@ import {
   TextStyle,
   TimelineTrack,
   VolumePoint,
+  FULL_FRAME_LAYOUT,
   mediaKindFor,
+  mediaTimeAt,
+  setClipSpeed,
   newId,
   newTrack,
   placeOnTrack,
   removeLayoutAt,
   setLayoutAt,
+  copyOf,
+  type ClipMove,
+  sliceLayout,
+  type CopiedClip,
+  timeAgo,
+  type RecoveryFile,
+  type Transition,
+  type WindowInfo,
   splitVolume,
   trackKindOf,
   toMillis,
@@ -80,9 +94,9 @@ const CAPTURE_MODES: {
   hint?: string;
 }[] = [
   { id: "display", label: "Display", icon: "🖥" },
-  { id: "window", label: "Window", icon: "🪟", hint: "Capturing a single window isn't wired up yet" },
+  { id: "window", label: "Window", icon: "🪟" },
   { id: "area", label: "Area", icon: "⛶" },
-  { id: "camera", label: "Camera Only", icon: "📹", hint: "Camera-only recording isn't wired up yet" },
+  { id: "camera", label: "Camera Only", icon: "📹" },
 ];
 
 function basename(path: string): string {
@@ -191,6 +205,32 @@ export function RecorderApp() {
   const [recordings, setRecordings] = useState<RecordingFile[]>([]);
 
   const [captureMode, setCaptureMode] = useState<CaptureMode>("display");
+  /** The windows on screen, and which one is to be recorded. Read when
+   * the Window mode is chosen rather than at startup: the list is only
+   * true for the moment it was taken. */
+  const [windows, setWindows] = useState<WindowInfo[]>([]);
+  const [windowTitle, setWindowTitle] = useState<string>("");
+  const [windowsLoading, setWindowsLoading] = useState(false);
+
+  const refreshWindows = useCallback(async () => {
+    setWindowsLoading(true);
+    try {
+      const found = await api.listWindows();
+      setWindows(found);
+      // Keep the chosen one if it is still open; otherwise take the first.
+      setWindowTitle((current) =>
+        found.some((w) => w.title === current) ? current : (found[0]?.title ?? ""),
+      );
+    } catch {
+      setWindows([]);
+    } finally {
+      setWindowsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (captureMode === "window") void refreshWindows();
+  }, [captureMode, refreshWindows]);
   const [startingRecorder, setStartingRecorder] = useState(false);
   const [deviceDebug, setDeviceDebug] = useState<string | null>(null);
   const [deviceDebugLoading, setDeviceDebugLoading] = useState(false);
@@ -203,9 +243,15 @@ export function RecorderApp() {
   const [activeMediaPath, setActiveMediaPath] = useState<string | null>(null);
   const [tracks, setTracks] = useState<TimelineTrack[]>(() => [newTrack("Track 1")]);
   const [audioPeaks, setAudioPeaks] = useState<PeakMap>(() => new Map());
-  /** The clip on the clipboard. Held as state rather than in a ref so the
-   * Paste entry can grey itself out until there is something to paste. */
-  const [clipboard, setClipboard] = useState<TimelineClip | null>(null);
+  /** What is on the clipboard, and which track each piece came from.
+   *
+   * A group keeps its shape: the pieces are held with their times and
+   * tracks measured from the earliest of them, so pasting puts them back
+   * in the same arrangement somewhere else rather than in a heap.
+   *
+   * Held as state rather than in a ref so the Paste entry can grey itself
+   * out until there is something to paste. */
+  const [clipboard, setClipboard] = useState<CopiedClip[]>([]);
 
   // Exporting. `exportProgress` doubles as "a render is running": null
   // when nothing is, a fraction once ffmpeg reports where it has got to.
@@ -219,13 +265,16 @@ export function RecorderApp() {
   /** Files already asked about, so a failed or empty answer isn't asked
    * for again on every render. */
   const peaksRequested = useRef<Set<string>>(new Set());
-  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [projectName, setProjectName] = useState("Untitled project");
   const [editorSettings, setEditorSettings] = useState<EditorSettings>(
     DEFAULT_EDITOR_SETTINGS,
   );
   const [isDirty, setIsDirty] = useState(false);
+  /** Work left behind by a session that ended without saving, waiting to
+   * be offered back. Null once the offer has been answered either way. */
+  const [recovery, setRecovery] = useState<RecoveryFile | null>(null);
 
   // Undo history. Each entry is the whole document as it stood *before* an
   // edit, which is simpler and far harder to get wrong than recording what
@@ -310,10 +359,10 @@ export function RecorderApp() {
     setEditorSettings(state.settings);
     // A step back is still a change against what is on disk.
     setIsDirty(true);
-    setSelectedClipId((current) =>
-      state.tracks.some((track) => track.clips.some((clip) => clip.id === current))
-        ? current
-        : null,
+    setSelectedClipIds((current) =>
+      current.filter((id) =>
+        state.tracks.some((track) => track.clips.some((clip) => clip.id === id)),
+      ),
     );
   }, []);
 
@@ -353,7 +402,7 @@ export function RecorderApp() {
    * recomputed goes in: durations and thumbnails are read back off disk
    * when the project is opened again. */
   const projectDocument = useCallback(
-    (name: string, savePath: string): ProjectFile => ({
+    (name: string, savePath: string | null): ProjectFile => ({
       format: "jdeditor-project",
       version: 1,
       name,
@@ -395,6 +444,8 @@ export function RecorderApp() {
         setProjectPath(written);
         setProjectName(name);
         setIsDirty(false);
+        // On disk now, so there is nothing left to offer back.
+        void api.clearRecovery().catch(() => {});
         return true;
       } catch (e) {
         setError(String(e));
@@ -406,12 +457,18 @@ export function RecorderApp() {
     [projectPath, projectName, projectDocument],
   );
 
-  /** Replaces whatever is loaded with a project from disk. */
-  const loadProjectFrom = useCallback(async (path: string) => {
+  /** Replaces whatever is loaded with the project in `text`.
+   *
+   * Takes the document rather than a path because a project does not
+   * always come from a file: work recovered after a crash is the same
+   * document, and `path` is where it belongs rather than where it was
+   * read from — null for one that had never been saved anywhere. */
+  const openProject = useCallback(
+    async (text: string, path: string | null, dirty: boolean) => {
     setError(null);
     setProjectBusy(true);
     try {
-      const parsed: ProjectFile = JSON.parse(await api.loadProject(path));
+      const parsed: ProjectFile = JSON.parse(text);
       if (parsed.format !== "jdeditor-project") {
         throw new Error("That file isn't a JDEditor project.");
       }
@@ -422,9 +479,10 @@ export function RecorderApp() {
       const entries = parsed.media ?? [];
       const found = await Promise.all(
         entries.map(async (entry) => {
-          const tries = entry.relative
-            ? [fromRelativeMediaPath(entry.relative, path), entry.path]
-            : [entry.path];
+          const tries =
+            entry.relative && path
+              ? [fromRelativeMediaPath(entry.relative, path), entry.path]
+              : [entry.path];
           for (const candidate of tries) {
             if (await api.pathExists(candidate)) {
               return { entry, at: candidate, there: true };
@@ -465,15 +523,18 @@ export function RecorderApp() {
           ),
         ),
       );
-      setSelectedClipId(null);
+      setSelectedClipIds([]);
       const active = parsed.activeMediaPath;
       setActiveMediaPath(
         (active && (moved.get(active) ?? active)) ?? items[0]?.path ?? null,
       );
       setEditorSettings({ ...DEFAULT_EDITOR_SETTINGS, ...(parsed.settings ?? {}) });
       setProjectPath(path);
-      setProjectName(parsed.name || basename(path).replace(/\.jd$/i, ""));
-      setIsDirty(false);
+      setProjectName(
+        parsed.name ||
+          (path ? basename(path).replace(/\.jd$/i, "") : "Untitled project"),
+      );
+      setIsDirty(dirty);
       clearHistory();
       setView("editor");
       items
@@ -484,19 +545,102 @@ export function RecorderApp() {
     } finally {
       setProjectBusy(false);
     }
-  }, [clearHistory]);
+    },
+    [clearHistory],
+  );
+
+  /** Replaces whatever is loaded with a project from disk. */
+  const loadProjectFrom = useCallback(
+    async (path: string) => {
+      let text: string;
+      try {
+        text = await api.loadProject(path);
+      } catch (e) {
+        setError(String(e));
+        return;
+      }
+      // Opened from its own file, so nothing is outstanding — and any
+      // work left behind by an earlier session has been let go of.
+      await openProject(text, path, false);
+      void api.clearRecovery().catch(() => {});
+    },
+    [openProject],
+  );
+
+  /** How long the editing has to pause before a copy is put away.
+   *
+   * Long enough that a drag is one write rather than fifty, short enough
+   * that what a crash costs is a sentence rather than an afternoon. */
+  const AUTOSAVE_QUIET_MS = 3000;
 
   const startEmptyProject = useCallback(() => {
     setProjectMedia([]);
     setTracks([newTrack("Track 1")]);
-    setSelectedClipId(null);
+    setSelectedClipIds([]);
     setActiveMediaPath(null);
     setProjectPath(null);
     setProjectName("Untitled project");
     setEditorSettings(DEFAULT_EDITOR_SETTINGS);
     setIsDirty(false);
     clearHistory();
+    void api.clearRecovery().catch(() => {});
   }, [clearHistory]);
+
+  // A copy of the work in progress, put away whenever the editing pauses.
+  //
+  // Written only while something is unsaved: once the project is on disk
+  // there is nothing a crash could take. `projectDocument` is rebuilt
+  // whenever the media, tracks, framing or settings change, so this effect
+  // starts its clock afresh on every edit and writes once the edits stop.
+  useEffect(() => {
+    if (!isDirty) return;
+    const timer = window.setTimeout(() => {
+      const document: RecoveryFile = {
+        format: "jdeditor-recovery",
+        version: 1,
+        savedAtMs: Date.now(),
+        projectPath,
+        project: projectDocument(projectName, projectPath),
+      };
+      // Nothing to tell the user if this fails: it is a safety net, and a
+      // net that cannot be hung is not a reason to stop working.
+      void api.writeRecovery(JSON.stringify(document)).catch(() => {});
+    }, AUTOSAVE_QUIET_MS);
+    return () => window.clearTimeout(timer);
+  }, [isDirty, projectDocument, projectName, projectPath]);
+
+  // Work left behind by a session that never got to close properly. The
+  // copy is only ever written while something is unsaved, so finding one
+  // at all means the last session ended with work outstanding.
+  useEffect(() => {
+    api
+      .readRecovery()
+      .then((text) => {
+        if (!text) return;
+        const parsed: RecoveryFile = JSON.parse(text);
+        if (parsed.format !== "jdeditor-recovery") return;
+        setRecovery(parsed);
+      })
+      .catch(() => {
+        // A copy that cannot be read is no worse than no copy at all.
+      });
+  }, []);
+
+  /** Takes the recovered work back. It is put in the editor exactly as it
+   * was, and left unsaved — the project's own file is untouched until the
+   * user saves over it themselves. */
+  const acceptRecovery = useCallback(async () => {
+    if (!recovery) return;
+    const found = recovery;
+    setRecovery(null);
+    await openProject(JSON.stringify(found.project), found.projectPath, true);
+  }, [recovery, openProject]);
+
+  /** Lets it go. Only the copy is removed; nothing of the user's is. */
+  const discardRecovery = useCallback(() => {
+    setRecovery(null);
+    void api.clearRecovery().catch(() => {});
+  }, []);
 
   useEffect(() => {
     api
@@ -554,8 +698,17 @@ export function RecorderApp() {
    * aside until the bar is done with it. */
   async function handleStartRecording() {
     setError(null);
-    if (!screenId) {
+    const cameraOnly = captureMode === "camera";
+    if (!screenId && !cameraOnly) {
       setError("Select a screen to record.");
+      return;
+    }
+    if (captureMode === "window" && !windowTitle) {
+      setError("Choose a window to record.");
+      return;
+    }
+    if (cameraOnly && !webcamId) {
+      setError("Select a camera to record.");
       return;
     }
     if (includeWebcam && !webcamId) {
@@ -573,8 +726,12 @@ export function RecorderApp() {
         config: {
           screen_id: screenId,
           area: null,
-          include_webcam: includeWebcam,
-          webcam_id: includeWebcam ? webcamId : null,
+          window_title: captureMode === "window" ? windowTitle : null,
+          camera_only: cameraOnly,
+          // The camera is the picture in camera-only, so it is never also
+          // the inset one.
+          include_webcam: includeWebcam && !cameraOnly,
+          webcam_id: includeWebcam || cameraOnly ? webcamId : null,
           include_audio: includeAudio,
           audio_id: includeAudio ? audioId : null,
           quality,
@@ -664,6 +821,39 @@ export function RecorderApp() {
   }
 
   /** How tall one track's row is drawn, as dragged on its name column. */
+  /** Takes a track away, clips and all. One step to undo, which is the
+   * only confirmation it needs. */
+  function handleRemoveTrack(trackId: string) {
+    if (tracks.length <= 1) return;
+    remember("remove-track");
+    setTracks((current) =>
+      current.length <= 1
+        ? current
+        : withTrackNames(current.filter((track) => track.id !== trackId)),
+    );
+    setIsDirty(true);
+  }
+
+  /** Names a track by hand. From then on it keeps that name rather than
+   * being renumbered along with the rest. */
+  function handleRenameTrack(trackId: string, name: string) {
+    const chosen = name.trim().slice(0, 40);
+    remember(`rename-track:${trackId}`);
+    setTracks((current) =>
+      withTrackNames(
+        current.map((track) =>
+          track.id === trackId
+            ? chosen
+              ? { ...track, name: chosen, named: true }
+              : // Emptied: back to being numbered with the others.
+                { ...track, named: undefined }
+            : track,
+        ),
+      ),
+    );
+    setIsDirty(true);
+  }
+
   function handleResizeTrack(trackId: string, height: number | undefined) {
     remember(`track-height:${trackId}`);
     setTracks((current) =>
@@ -701,14 +891,38 @@ export function RecorderApp() {
         }
 
         const [before, after] = splitVolume(clip.volume, offset);
-        clips.push({ ...clip, durationSeconds: toMillis(offset), volume: before });
+        const resting = clip.layout ?? FULL_FRAME_LAYOUT;
+        const tail = toMillis(clip.durationSeconds - offset);
+        clips.push({
+          ...clip,
+          durationSeconds: toMillis(offset),
+          volume: before,
+          // The zoom is divided along with the sound. Handing both halves
+          // the whole list left the second one holding framings timed
+          // against a clip it is no longer part of.
+          layoutPoints: sliceLayout(clip.layoutPoints, 0, offset, resting),
+          // The cut is a cut: the first half keeps how it arrived, the
+          // second keeps how it leaves, and neither gains a transition at
+          // the join that the editor never asked for.
+          transitionOut: undefined,
+        });
         clips.push({
           ...clip,
           id: newId("clip"),
           startSeconds: toMillis(atSeconds),
-          durationSeconds: toMillis(clip.durationSeconds - offset),
-          trimStartSeconds: toMillis((clip.trimStartSeconds ?? 0) + offset),
+          durationSeconds: tail,
+          // The second half begins further into the file by as much
+          // material as the first half used, which at anything but normal
+          // speed is not the same as the time it took.
+          trimStartSeconds: toMillis(mediaTimeAt(clip, offset)),
           volume: after,
+          layoutPoints: sliceLayout(
+            clip.layoutPoints,
+            offset,
+            clip.durationSeconds,
+            resting,
+          ),
+          transitionIn: undefined,
         });
         cuts += 1;
       }
@@ -720,6 +934,52 @@ export function RecorderApp() {
     setTracks(next);
     setIsDirty(true);
     return cuts;
+  }
+
+  /** How a clip arrives or leaves. Passing nothing takes the transition
+   * off again, which puts the edge back to a plain cut. */
+  function handleSetTransition(
+    clipIds: string[],
+    edge: "in" | "out",
+    transition: Transition | undefined,
+  ) {
+    if (clipIds.length === 0) return;
+    const chosen = new Set(clipIds);
+    remember(`transition:${clipIds.join(",")}:${edge}`);
+    setTracks((current) =>
+      current.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) =>
+          chosen.has(clip.id)
+            ? edge === "in"
+              ? { ...clip, transitionIn: transition }
+              : { ...clip, transitionOut: transition }
+            : clip,
+        ),
+      })),
+    );
+    setIsDirty(true);
+  }
+
+  /** How fast a clip plays. Its length on the timeline changes with it,
+   * and what follows it on the same track moves along. */
+  function handleSetSpeed(clipIds: string[], speed: number) {
+    if (clipIds.length === 0) return;
+    remember(`speed:${clipIds.join(",")}`);
+    setTracks((current) => {
+      // Earliest first: each one closes up what follows it, and doing them
+      // in the order they play means a later clip is moved by the ripple
+      // of an earlier one before its own is worked out.
+      const order = current
+        .flatMap((track) => track.clips)
+        .filter((clip) => clipIds.includes(clip.id))
+        .sort((a, b) => a.startSeconds - b.startSeconds)
+        .map((clip) => clip.id);
+      let next = current;
+      for (const id of order) next = setClipSpeed(next, id, speed);
+      return next;
+    });
+    setIsDirty(true);
   }
 
   /** The clip's volume line, as dragged on the timeline. Passing nothing
@@ -737,52 +997,93 @@ export function RecorderApp() {
     setIsDirty(true);
   }
 
-  /** Puts a copy of a clip on the clipboard. Everything about it travels —
-   * where it reads from in its file, its volume line, whether it is muted
-   * — except its identity, which the paste gives it anew. */
-  function handleCopyClip(clipId: string) {
-    const found = tracks.flatMap((track) => track.clips).find((c) => c.id === clipId);
-    if (found) setClipboard(found);
+  /** Puts copies of clips on the clipboard. Everything about them travels
+   * — where each reads from in its file, its volume line, whether it is
+   * muted — except their identities, which the paste gives them anew. */
+  function handleCopyClips(clipIds: string[]) {
+    setClipboard(copyOf(tracks, clipIds));
   }
 
-  /** Drops what is on the clipboard onto a track at a moment, over
-   * whatever is already there — the same rule as dragging one in. */
-  function handlePasteClip(trackId: string, seconds: number) {
-    if (!clipboard) return;
+  /** Drops what is on the clipboard onto the timeline at a moment.
+   *
+   * `trackId` says where the earliest piece lands; the rest keep their
+   * places relative to it, moving down the same number of tracks they were
+   * apart when they were copied. Anything already there gives way, the
+   * same rule as dragging a clip in.
+   */
+  function handlePasteClips(trackId: string, seconds: number) {
+    if (clipboard.length === 0) return;
+    const landing = tracks.findIndex((track) => track.id === trackId);
+    if (landing < 0) return;
+
     remember("paste");
-    const pasted: TimelineClip = {
-      ...clipboard,
-      id: newId("clip"),
-      startSeconds: toMillis(Math.max(0, seconds)),
-    };
+    const at = toMillis(Math.max(0, seconds));
+    const laid: { trackId: string; clip: TimelineClip }[] = [];
+    for (const piece of clipboard) {
+      const onto = tracks[Math.min(tracks.length - 1, landing + piece.trackOffset)];
+      if (!onto) continue;
+      laid.push({
+        trackId: onto.id,
+        clip: {
+          ...piece.clip,
+          id: newId("clip"),
+          startSeconds: toMillis(at + piece.startOffset),
+        },
+      });
+    }
+
     setTracks((current) =>
-      current.map((track) =>
-        track.id === trackId
-          ? { ...track, clips: placeOnTrack(track.clips, pasted) }
-          : track,
-      ),
+      current.map((track) => {
+        const mine = laid.filter((entry) => entry.trackId === track.id);
+        if (mine.length === 0) return track;
+        let clips = track.clips;
+        for (const entry of mine) clips = placeOnTrack(clips, entry.clip);
+        return { ...track, clips };
+      }),
     );
-    setSelectedClipId(pasted.id);
+    setSelectedClipIds(laid.map((entry) => entry.clip.id));
     setIsDirty(true);
   }
 
-  /** A second copy of a clip, laid down directly after the original. */
-  function handleDuplicateClip(clipId: string) {
-    const track = tracks.find((t) => t.clips.some((c) => c.id === clipId));
-    const source = track?.clips.find((c) => c.id === clipId);
-    if (!track || !source) return;
+  /** A second copy of each clip, laid down directly after the last of
+   * them, keeping the arrangement they were in. */
+  function handleDuplicateClips(clipIds: string[]) {
+    const pieces = copyOf(tracks, clipIds);
+    if (pieces.length === 0) return;
+    const first = pieces[0].clip.startSeconds;
+    // Far enough along that the copies clear the originals entirely.
+    const span = clipIds
+      .flatMap((id) => tracks.flatMap((t) => t.clips.filter((c) => c.id === id)))
+      .reduce((end, clip) => Math.max(end, clip.startSeconds + clip.durationSeconds), 0);
+    const shift = toMillis(span - first);
+
     remember("duplicate");
-    const copy: TimelineClip = {
-      ...source,
-      id: newId("clip"),
-      startSeconds: toMillis(source.startSeconds + source.durationSeconds),
-    };
+    const laid: { trackId: string; clip: TimelineClip }[] = [];
+    for (const piece of pieces) {
+      const source = tracks.findIndex((t) =>
+        t.clips.some((c) => c.id === piece.clip.id),
+      );
+      const onto = tracks[source] ?? tracks[0];
+      laid.push({
+        trackId: onto.id,
+        clip: {
+          ...piece.clip,
+          id: newId("clip"),
+          startSeconds: toMillis(piece.clip.startSeconds + shift),
+        },
+      });
+    }
+
     setTracks((current) =>
-      current.map((t) =>
-        t.id === track.id ? { ...t, clips: placeOnTrack(t.clips, copy) } : t,
-      ),
+      current.map((track) => {
+        const mine = laid.filter((entry) => entry.trackId === track.id);
+        if (mine.length === 0) return track;
+        let clips = track.clips;
+        for (const entry of mine) clips = placeOnTrack(clips, entry.clip);
+        return { ...track, clips };
+      }),
     );
-    setSelectedClipId(copy.id);
+    setSelectedClipIds(laid.map((entry) => entry.clip.id));
     setIsDirty(true);
   }
 
@@ -863,6 +1164,11 @@ export function RecorderApp() {
         mediaPath: clip.mediaPath,
         startSeconds: clip.startSeconds,
         durationSeconds: clip.durationSeconds,
+        trimStartSeconds: clip.trimStartSeconds,
+        speed: clip.speed,
+        // Named so the two can be kept the same length afterwards: change
+        // the picture's speed and its sound has to follow.
+        sourceClipId: clip.id,
         // Sound wherever it goes, even if it is later moved onto a video
         // track: it points at a video file, and only this says why.
         soundOnly: true,
@@ -895,7 +1201,7 @@ export function RecorderApp() {
       // already open doesn't have to be reloaded to behave.
       return withTrackNames(withSoundOnlyClips(next));
     });
-    setSelectedClipId(clipId);
+    setSelectedClipIds([clipId]);
     setIsDirty(true);
   }
 
@@ -924,7 +1230,41 @@ export function RecorderApp() {
           : track,
       ),
     );
-    setSelectedClipId(clip.id);
+    setSelectedClipIds([clip.id]);
+    setIsDirty(true);
+  }
+
+  function handleMoveClips(moves: ClipMove[]) {
+    if (moves.length === 0) return;
+    if (moves.length === 1) {
+      handleMoveClip(moves[0].clipId, moves[0].trackId, moves[0].startSeconds);
+      return;
+    }
+
+    remember("move-clip");
+    const moving = new Set(moves.map((move) => move.clipId));
+    setTracks((current) => {
+      const carried = new Map<string, TimelineClip[]>();
+      for (const move of moves) {
+        const found = current
+          .flatMap((track) => track.clips)
+          .find((clip) => clip.id === move.clipId);
+        if (!found) continue;
+        const onto = carried.get(move.trackId) ?? [];
+        onto.push({ ...found, startSeconds: move.startSeconds });
+        carried.set(move.trackId, onto);
+      }
+
+      // Lifted off every track first, then laid down: a clip moving from
+      // one track to another must not be made to give way to itself.
+      return current.map((track) => {
+        let clips = track.clips.filter((clip) => !moving.has(clip.id));
+        for (const clip of carried.get(track.id) ?? []) {
+          clips = placeOnTrack(clips, clip);
+        }
+        return clips === track.clips ? track : { ...track, clips };
+      });
+    });
     setIsDirty(true);
   }
 
@@ -982,10 +1322,17 @@ export function RecorderApp() {
    */
   async function handleRelinkMedia(oldPath: string) {
     const item = projectMedia.find((m) => m.path === oldPath);
-    const picked = await api.pickMediaFile(item?.name ?? mediaFileName(oldPath));
+    const picked = await api.pickMediaFile(
+      item?.name ?? mediaFileName(oldPath),
+      (item?.kind ?? mediaKindFor(oldPath)) === "audio" ? "audio" : "visual",
+    );
     if (!picked) return;
 
-    const folder = picked.split(/[\/]/).slice(0, -1).join("/");
+    // Read through `folderOf` rather than split here: the file dialog
+    // hands back a Windows path with backslashes, and splitting on "/"
+    // alone left the folder as the whole file path — so nothing was ever
+    // found beside it.
+    const folder = folderOf(picked);
     const others = projectMedia.filter(
       (m) => m.status === "missing" && m.path !== oldPath,
     );
@@ -1043,7 +1390,7 @@ export function RecorderApp() {
           : track,
       ),
     );
-    setSelectedClipId(clip.id);
+    setSelectedClipIds([clip.id]);
     setIsDirty(true);
   }
 
@@ -1088,15 +1435,17 @@ export function RecorderApp() {
     setIsDirty(true);
   }
 
-  function handleRemoveClip(clipId: string) {
+  function handleRemoveClips(clipIds: string[]) {
+    if (clipIds.length === 0) return;
+    const going = new Set(clipIds);
     remember("remove-clip");
     setTracks((current) =>
       current.map((track) => ({
         ...track,
-        clips: track.clips.filter((clip) => clip.id !== clipId),
+        clips: track.clips.filter((clip) => !going.has(clip.id)),
       })),
     );
-    setSelectedClipId((current) => (current === clipId ? null : current));
+    setSelectedClipIds((current) => current.filter((id) => !going.has(id)));
     setIsDirty(true);
   }
 
@@ -1138,12 +1487,24 @@ export function RecorderApp() {
     const target = await api.pickExportPath(suggested, exportSettings.format);
     if (!target) return;
 
-    const canvas = exportCanvas(projectMedia, exportSettings.resolution);
+    const canvas = exportCanvas(
+      projectMedia,
+      exportSettings.resolution,
+      editorSettings.aspect,
+    );
+    const geometry = frameGeometry(canvas.width, canvas.height, editorSettings);
     let titles: Map<string, string>;
+    let backdrop: string | null;
     try {
       // Drawn before the plan is built, because the plan needs to know
-      // where each one landed.
-      titles = await renderTitles(tracks, canvas.width, canvas.height);
+      // where each one landed. Titles are drawn at the stage's size —
+      // that is the box they cover on screen, padding excluded.
+      titles = await renderTitles(
+        tracks,
+        Math.round(geometry.stage.width),
+        Math.round(geometry.stage.height),
+      );
+      backdrop = await renderBackdrop(editorSettings, canvas.width, canvas.height);
     } catch (e) {
       setExportError(String(e).replace(/^Error:\s*/, ""));
       return;
@@ -1153,8 +1514,10 @@ export function RecorderApp() {
       tracks,
       projectMedia,
       exportSettings,
+      editorSettings,
       target,
       titles,
+      backdrop,
     );
     if ("error" in built) {
       setExportError(built.error);
@@ -1214,6 +1577,40 @@ export function RecorderApp() {
     if (await saveProject()) await runExitAction(action);
   }
 
+  // Offered before anything else, and over whatever is on screen: work
+  // that is about to be thrown away is the most urgent thing the editor
+  // has to say.
+  const recoveryOffer = recovery && (
+    <div className="project-modal-backdrop">
+      <div className="project-modal" role="dialog" aria-modal="true">
+        <h2>Pick up where you left off?</h2>
+        <p>
+          &ldquo;{recovery.project.name || "Untitled project"}&rdquo; was still
+          being edited when the app last closed, and those changes were never
+          saved. The copy is from {timeAgo(Date.now() - recovery.savedAtMs)}.
+        </p>
+        {recovery.projectPath && (
+          <p className="export-note">
+            Its file is at <span className="export-path">{recovery.projectPath}</span>
+            , and is left exactly as it was until you save.
+          </p>
+        )}
+        <div className="project-modal-actions">
+          <button
+            className="project-modal-primary"
+            onClick={() => void acceptRecovery()}
+            disabled={projectBusy}
+          >
+            Restore
+          </button>
+          <button onClick={discardRecovery} disabled={projectBusy}>
+            Discard
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   if (view === "editor") {
     return (
       <>
@@ -1224,13 +1621,13 @@ export function RecorderApp() {
           isDirty={isDirty}
           settings={editorSettings}
           tracks={tracks}
-          selectedClipId={selectedClipId}
+          selectedClipIds={selectedClipIds}
           onSettingsChange={handleSettingsChange}
-          onSelectClip={setSelectedClipId}
+          onSelectClips={setSelectedClipIds}
           onAddTrack={handleAddTrack}
           onAddClip={handleAddClip}
-          onMoveClip={handleMoveClip}
-          onRemoveClip={handleRemoveClip}
+          onMoveClips={handleMoveClips}
+          onRemoveClips={handleRemoveClips}
           onUpdateClipLayout={handleUpdateClipLayout}
           onAddLayoutPoint={handleAddLayoutPoint}
           onAddTextClip={handleAddTextClip}
@@ -1248,14 +1645,18 @@ export function RecorderApp() {
           canRedo={historyDepth.redo > 0}
           onUndo={undo}
           onRedo={redo}
-          clipboardHasClip={clipboard !== null}
-          onCopyClip={handleCopyClip}
-          onPasteClip={handlePasteClip}
-          onDuplicateClip={handleDuplicateClip}
+          clipboardCount={clipboard.length}
+          onCopyClips={handleCopyClips}
+          onPasteClips={handlePasteClips}
+          onDuplicateClips={handleDuplicateClips}
           onTrimClip={handleTrimClip}
           onResizeTrack={handleResizeTrack}
+          onRemoveTrack={handleRemoveTrack}
+          onRenameTrack={handleRenameTrack}
           onCutAt={handleCutAt}
           onSplitClipAudio={handleSplitClipAudio}
+          onSetTransition={handleSetTransition}
+          onSetSpeed={handleSetSpeed}
           onSelectMedia={setActiveMediaPath}
           onImportMedia={handleImportMedia}
           onRemoveMedia={handleRemoveMedia}
@@ -1293,6 +1694,7 @@ export function RecorderApp() {
           </div>
         )}
 
+        {recoveryOffer}
         {pendingExit && (
           <div className="project-modal-backdrop">
             <div className="project-modal" role="dialog" aria-modal="true">
@@ -1328,10 +1730,13 @@ export function RecorderApp() {
 
   if (view === "launcher") {
     return (
-      <Launcher
-        onSelectRecord={() => setView("recorder")}
-        onSelectEditor={() => setView("editor")}
-      />
+      <>
+        {recoveryOffer}
+        <Launcher
+          onSelectRecord={() => setView("recorder")}
+          onSelectEditor={() => setView("editor")}
+        />
+      </>
     );
   }
 
@@ -1422,7 +1827,39 @@ export function RecorderApp() {
       </div>
 
       <ul className="capture-devices">
-        {(devices?.screens.length ?? 0) > 1 && (
+        {captureMode === "window" && (
+          <li className="capture-row">
+            <span className="capture-row-icon">🪟</span>
+            {windows.length ? (
+              <select
+                className="capture-row-select"
+                value={windowTitle}
+                onChange={(e) => setWindowTitle(e.target.value)}
+              >
+                {windows.map((w) => (
+                  <option key={w.title} value={w.title}>
+                    {w.title}
+                    {w.app ? ` · ${w.app}` : ""}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="capture-row-empty">
+                {windowsLoading ? "Looking…" : "No open windows found"}
+              </span>
+            )}
+            <button
+              className="capture-toggle"
+              title="Look again — the list is only true for the moment it was taken"
+              onClick={() => void refreshWindows()}
+              disabled={windowsLoading}
+            >
+              {windowsLoading ? "…" : "Refresh"}
+            </button>
+          </li>
+        )}
+
+        {captureMode !== "camera" && (devices?.screens.length ?? 0) > 1 && (
           <li className="capture-row">
             <span className="capture-row-icon">🖥</span>
             <select
@@ -1447,7 +1884,7 @@ export function RecorderApp() {
             <select
               className="capture-row-select"
               value={webcamId}
-              disabled={!includeWebcam}
+              disabled={!includeWebcam && captureMode !== "camera"}
               onChange={(e) => setWebcamId(e.target.value)}
             >
               {devices.webcams.map((w) => (
@@ -1459,13 +1896,19 @@ export function RecorderApp() {
           ) : (
             <span className="capture-row-empty">No camera found</span>
           )}
-          <button
-            className={`capture-toggle ${includeWebcam ? "on" : ""}`}
-            onClick={() => setIncludeWebcam((on) => !on)}
-            disabled={!devices?.webcams.length}
-          >
-            {includeWebcam ? "On" : "Off"}
-          </button>
+          {captureMode === "camera" ? (
+            // It is the recording here, not something laid over one, so
+            // there is nothing to switch off.
+            <span className="capture-toggle capture-toggle-static">On</span>
+          ) : (
+            <button
+              className={`capture-toggle ${includeWebcam ? "on" : ""}`}
+              onClick={() => setIncludeWebcam((on) => !on)}
+              disabled={!devices?.webcams.length}
+            >
+              {includeWebcam ? "On" : "Off"}
+            </button>
+          )}
         </li>
 
         <li className="capture-row">
@@ -1544,7 +1987,11 @@ export function RecorderApp() {
           ? "Opening recorder…"
           : captureMode === "area"
             ? "Start — pick an area"
-            : "Start Recording"}
+            : captureMode === "window"
+              ? "Start — record this window"
+              : captureMode === "camera"
+                ? "Start — camera only"
+                : "Start Recording"}
       </button>
 
       <p className="capture-hint">

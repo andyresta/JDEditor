@@ -58,6 +58,15 @@ pub struct RecordingConfig {
     pub screen_id: String,
     /// Optional region within the screen. None = full screen.
     pub area: Option<Rect>,
+    /// One window, by its title bar, instead of the screen. The window is
+    /// followed wherever it is moved to and whatever size it is made,
+    /// because it is the window being captured rather than the patch of
+    /// screen it happens to be over.
+    #[serde(default)]
+    pub window_title: Option<String>,
+    /// The camera on its own, with no screen in the recording at all.
+    #[serde(default)]
+    pub camera_only: bool,
 
     pub include_webcam: bool,
     pub webcam_id: Option<String>,

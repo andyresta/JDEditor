@@ -483,6 +483,10 @@ fn timestamped_filename() -> String {
 }
 
 fn screen_input(config: &RecordingConfig, screen: &ScreenInfo, screen_index: usize) -> (Vec<String>, Option<String>) {
+    if let Some(title) = config.window_title.as_deref() {
+        return window_input(config.fps, title);
+    }
+
     let rect = config.area.unwrap_or(Rect {
         x: screen.x,
         y: screen.y,
@@ -502,6 +506,33 @@ fn screen_input(config: &RecordingConfig, screen: &ScreenInfo, screen_index: usi
     };
 
     build_screen_input(config.fps, screen_index, rect)
+}
+
+/// Captures one window rather than a patch of screen.
+///
+/// Its size is whatever the window is, and is not known until the capture
+/// opens — so unlike an area, which is trimmed to even dimensions before
+/// it is asked for, this one is trimmed afterwards. An odd width or height
+/// cannot be encoded, and a window is an odd size about half the time.
+#[cfg(target_os = "windows")]
+fn window_input(fps: u32, title: &str) -> (Vec<String>, Option<String>) {
+    let args = vec![
+        "-f".into(),
+        "gdigrab".into(),
+        "-framerate".into(),
+        fps.to_string(),
+        "-i".into(),
+        format!("title={title}"),
+    ];
+    (args, Some("crop=trunc(iw/2)*2:trunc(ih/2)*2".to_string()))
+}
+
+/// Not offered elsewhere. Said plainly rather than quietly recording the
+/// whole screen instead, which is the sort of surprise a screen recorder
+/// must never spring.
+#[cfg(not(target_os = "windows"))]
+fn window_input(_fps: u32, _title: &str) -> (Vec<String>, Option<String>) {
+    (Vec::new(), None)
 }
 
 #[cfg(target_os = "linux")]
@@ -644,14 +675,25 @@ fn build_ffmpeg_args(
     screen_index: usize,
     output_path: &Path,
 ) -> Result<Vec<String>, String> {
-    let (screen_spec, screen_crop) = screen_input(config, screen, screen_index);
+    if config.window_title.is_some() && !cfg!(target_os = "windows") {
+        return Err("Recording a single window is only available on Windows.".to_string());
+    }
 
     let mut args: Vec<String> = vec!["-y".to_string()];
-    args.extend(screen_spec);
-    let screen_in = 0usize;
-    let mut next_input = 1usize;
+    let mut next_input = 0usize;
 
-    let webcam_in = if config.include_webcam {
+    // The camera on its own has no screen behind it: it is the picture,
+    // not something laid over one.
+    let (screen_in, screen_crop) = if config.camera_only {
+        (None, None)
+    } else {
+        let (screen_spec, crop) = screen_input(config, screen, screen_index);
+        args.extend(screen_spec);
+        next_input += 1;
+        (Some(0usize), crop)
+    };
+
+    let webcam_in = if config.include_webcam || config.camera_only {
         let id = config
             .webcam_id
             .as_deref()
@@ -663,6 +705,10 @@ fn build_ffmpeg_args(
     } else {
         None
     };
+
+    if config.camera_only && webcam_in.is_none() {
+        return Err("Camera-only recording needs a camera to record.".to_string());
+    }
 
     let audio_in = if config.include_audio {
         let id = config
@@ -682,18 +728,30 @@ fn build_ffmpeg_args(
     // encoder accepts at all).
     let (target_height, bitrate) = config.quality.params();
 
-    let mut screen_chain = format!("[{screen_in}:v]");
+    // Whichever input carries the picture: the screen, or the camera when
+    // there is no screen to lay it over.
+    let picture_in = screen_in.or(webcam_in).ok_or_else(|| {
+        "A recording needs either a screen or a camera to record.".to_string()
+    })?;
+    let mut screen_chain = format!("[{picture_in}:v]");
     if let Some(crop) = &screen_crop {
         screen_chain.push_str(crop);
         screen_chain.push(',');
     }
     if target_height > 0 {
         screen_chain.push_str(&format!("scale=-2:{target_height}"));
+    } else if config.camera_only {
+        // At source quality nothing resizes the picture, and a camera's
+        // own size is not guaranteed to be even any more than a window's.
+        screen_chain.push_str("crop=trunc(iw/2)*2:trunc(ih/2)*2");
     } else {
         screen_chain.push_str("null");
     }
 
-    let filter_complex = if let Some(cam_in) = webcam_in {
+    // The camera is the picture here, so there is nothing to inset it over.
+    let overlay_cam = if config.camera_only { None } else { webcam_in };
+
+    let filter_complex = if let Some(cam_in) = overlay_cam {
         format!(
             "{screen_chain}[screen];[{cam_in}:v]scale=320:-2[cam];[screen][cam]overlay=W-w-20:H-h-20[vout]"
         )
@@ -731,4 +789,195 @@ fn build_ffmpeg_args(
     args.push(output_path.to_string_lossy().to_string());
 
     Ok(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::QualityPreset;
+
+    fn screen() -> ScreenInfo {
+        ScreenInfo {
+            id: "screen-0".into(),
+            name: "Display 1".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            is_primary: true,
+        }
+    }
+
+    fn config() -> RecordingConfig {
+        RecordingConfig {
+            screen_id: "screen-0".into(),
+            area: None,
+            window_title: None,
+            camera_only: false,
+            include_webcam: false,
+            webcam_id: None,
+            include_audio: false,
+            audio_id: None,
+            quality: QualityPreset::Medium,
+            fps: 30,
+            output_dir: None,
+        }
+    }
+
+    fn args_for(config: &RecordingConfig) -> String {
+        build_ffmpeg_args(config, &screen(), 0, std::path::Path::new("out.mp4"))
+            .expect("args")
+            .join(" ")
+    }
+
+    #[test]
+    fn the_screen_is_still_the_default() {
+        let args = args_for(&config());
+        assert!(args.contains("gdigrab") || args.contains("x11grab") || args.contains("avfoundation"), "{args}");
+        assert!(!args.contains("title="), "{args}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn one_window_is_captured_by_its_name() {
+        let mut only = config();
+        only.window_title = Some("Ledger — Notepad".into());
+        let args = args_for(&only);
+
+        assert!(args.contains("title=Ledger — Notepad"), "{args}");
+        // A window is whatever size it is, and an odd one cannot be
+        // encoded — so it is trimmed after the capture rather than before.
+        assert!(args.contains("crop=trunc(iw/2)*2:trunc(ih/2)*2"), "{args}");
+        // Nothing about the screen's own region: it is the window being
+        // followed, not the patch of desktop it happens to sit over.
+        assert!(!args.contains("-offset_x"), "{args}");
+    }
+
+    #[test]
+    fn the_camera_on_its_own_records_no_screen() {
+        let mut camera = config();
+        camera.camera_only = true;
+        camera.webcam_id = Some("HD Webcam".into());
+        let args = args_for(&camera);
+
+        assert!(!args.contains("gdigrab"), "{args}");
+        assert!(!args.contains("x11grab"), "{args}");
+        // The camera is the picture, so it is not scaled down and inset in
+        // a corner the way it is when it is laid over a screen.
+        assert!(!args.contains("scale=320"), "{args}");
+        assert!(!args.contains("overlay="), "{args}");
+        assert!(args.contains("[0:v]"), "{args}");
+    }
+
+    #[test]
+    fn the_camera_on_its_own_still_needs_a_camera() {
+        let mut camera = config();
+        camera.camera_only = true;
+        let refused = build_ffmpeg_args(&camera, &screen(), 0, std::path::Path::new("out.mp4"));
+        assert!(refused.is_err(), "a camera recording with no camera should be refused");
+    }
+
+    #[test]
+    fn a_camera_over_a_screen_is_still_inset() {
+        let mut both = config();
+        both.include_webcam = true;
+        both.webcam_id = Some("HD Webcam".into());
+        let args = args_for(&both);
+        assert!(args.contains("scale=320"), "{args}");
+        assert!(args.contains("overlay="), "{args}");
+        // The screen is the first input and the camera the second.
+        assert!(args.contains("[1:v]scale=320"), "{args}");
+    }
+
+    #[test]
+    fn sound_is_numbered_after_whatever_carries_the_picture() {
+        let mut camera = config();
+        camera.camera_only = true;
+        camera.webcam_id = Some("HD Webcam".into());
+        camera.include_audio = true;
+        camera.audio_id = Some("Microphone".into());
+        let args = args_for(&camera);
+        // Camera is input 0 with no screen ahead of it, so the microphone
+        // is input 1 rather than 2.
+        assert!(args.contains("-map 1:a"), "{args}");
+    }
+
+    /// The camera-only command, run for real with a test pattern standing
+    /// in for the camera.
+    ///
+    /// The machine this is written on has no camera, and `-f dshow` cannot
+    /// be faked — but the camera driver is not the part that could be
+    /// wrong. What could be wrong is everything after it: which input
+    /// carries the picture, whether a screen chain is still referenced,
+    /// whether the sound is numbered against the right input. Swapping the
+    /// two arguments that name the device leaves all of that under test.
+    #[test]
+    fn the_camera_only_command_encodes_a_real_file() {
+        let mut camera = config();
+        camera.camera_only = true;
+        camera.webcam_id = Some("HD Webcam".into());
+        let out = std::env::temp_dir().join("jd-camera-only.mp4");
+        let args = build_ffmpeg_args(&camera, &screen(), 0, &out).expect("args");
+
+        // "-f dshow ... -i video=HD Webcam" becomes a test pattern of the
+        // same shape. Everything else is left exactly as the app built it.
+        let mut swapped: Vec<String> = Vec::new();
+        let mut index = 0usize;
+        while index < args.len() {
+            if args[index] == "-f" && index + 1 < args.len() && is_capture_format(&args[index + 1]) {
+                swapped.push("-f".into());
+                swapped.push("lavfi".into());
+                index += 2;
+                continue;
+            }
+            // lavfi has no frame rate option of its own; the source
+            // carries it. Left in, it would be refused before anything
+            // this test cares about was reached.
+            if args[index] == "-framerate" && index + 1 < args.len() {
+                index += 2;
+                continue;
+            }
+            if args[index] == "-i" && index + 1 < args.len() {
+                swapped.push("-i".into());
+                swapped.push("testsrc2=size=1280x720:rate=30:duration=1".into());
+                index += 2;
+                continue;
+            }
+            swapped.push(args[index].clone());
+            index += 1;
+        }
+        // The recording runs until it is told to stop; this one has to end
+        // on its own.
+        swapped.insert(0, "-t".into());
+        swapped.insert(1, "1".into());
+
+        let run = crate::sidecar::command("ffmpeg")
+            .args(&swapped)
+            .output()
+            .expect("ffmpeg ran");
+        assert!(
+            run.status.success(),
+            "the camera-only command was refused:\n{}\nargs: {}",
+            String::from_utf8_lossy(&run.stderr),
+            swapped.join(" ")
+        );
+
+        let probe = crate::sidecar::command("ffprobe")
+            .args([
+                "-v", "error", "-show_entries", "stream=codec_type,height", "-of",
+                "csv=p=0", &out.to_string_lossy(),
+            ])
+            .output()
+            .expect("ffprobe ran");
+        let shape = String::from_utf8_lossy(&probe.stdout);
+        let shape = shape.trim();
+        // One picture, at the quality that was asked for, and nothing else.
+        assert!(shape.contains("video"), "no picture was written: {shape}");
+        assert_eq!(shape.lines().count(), 1, "more streams than asked for: {shape}");
+        let _ = std::fs::remove_file(&out);
+    }
+
+    fn is_capture_format(name: &str) -> bool {
+        matches!(name, "dshow" | "v4l2" | "avfoundation" | "gdigrab" | "x11grab")
+    }
 }

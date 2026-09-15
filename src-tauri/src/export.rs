@@ -24,8 +24,32 @@ pub struct PlanClip {
     pub audible: bool,
     /// A still image, which has to be looped rather than decoded.
     pub still: bool,
-    /// Width as a fraction of the canvas, and the centre of the layer as a
-    /// fraction of the canvas measured from its own centre.
+    /// Whether the project's corner radius applies. Footage is rounded; a
+    /// title, being words on a transparent sheet, is not.
+    #[serde(default)]
+    pub rounded: bool,
+    /// How long it fades up at its start and away at its end, in its own
+    /// seconds. Zero for a transition that only moves the picture, whose
+    /// travelling is described by `zoom` instead, and for a plain cut.
+    #[serde(default)]
+    pub fade_in: f64,
+    #[serde(default)]
+    pub fade_out: f64,
+    /// Extra seconds of its own material to keep playing after its end, so
+    /// the clip after it can arrive over the top rather than out of the
+    /// backdrop.
+    #[serde(default)]
+    pub hold: f64,
+    /// The part of that hold there is no material left for, held on the
+    /// last frame instead.
+    #[serde(default)]
+    pub freeze: f64,
+    /// How fast it plays. Every other figure here is in timeline seconds;
+    /// this is what turns them into seconds of the file.
+    #[serde(default = "one")]
+    pub speed: f64,
+    /// Width as a fraction of the stage, and the centre of the layer as a
+    /// fraction of the stage measured from the stage's own centre.
     pub scale: f64,
     pub x: f64,
     pub y: f64,
@@ -47,6 +71,15 @@ pub struct PlanZoomPoint {
     pub y: f64,
 }
 
+/// A rectangle inside the frame, in the frame's own pixels.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PlanRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PlanVolumePoint {
     pub at: f64,
@@ -61,6 +94,17 @@ pub struct ExportPlan {
     /// Canvas size. Always even, because H.264 cannot encode odd ones.
     pub width: u32,
     pub height: u32,
+    /// Where the footage goes inside that canvas: the frame inset by the
+    /// project's padding. Placements are fractions of this, not of the
+    /// whole frame, which is what the preview measures them against.
+    pub stage: PlanRect,
+    /// Corner radius for footage, in the frame's own pixels.
+    #[serde(default)]
+    pub radius: f64,
+    /// The backdrop the editor painted, on disk. None leaves the frame
+    /// black behind the footage.
+    #[serde(default)]
+    pub backdrop: Option<String>,
     pub fps: u32,
     pub duration: f64,
     /// Encoder quality, already chosen for the format by the editor.
@@ -90,24 +134,24 @@ pub fn cancel(app: &tauri::AppHandle) {
     }
 }
 
-/// Puts a title's picture on disk for the renderer to overlay.
+/// Puts a picture the editor drew on disk for the renderer to overlay.
 ///
-/// Named after the clip rather than given a fresh name each time, so
-/// exporting the same project twice leaves one file per title instead of
-/// a growing pile of them.
-pub fn write_text_image(
+/// Named after what it belongs to rather than given a fresh name each
+/// time, so exporting the same project twice leaves one file per title
+/// instead of a growing pile of them.
+pub fn write_overlay_image(
     app: &tauri::AppHandle,
-    clip_id: &str,
+    name: &str,
     bytes: &[u8],
 ) -> Result<String, String> {
-    // Only the characters a file name can safely hold; the id is ours, but
-    // a path is not the place to trust that.
-    let safe: String = clip_id
+    // Only the characters a file name can safely hold; the name is ours,
+    // but a path is not the place to trust that.
+    let safe: String = name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     if safe.is_empty() {
-        return Err("A title needs a name to be stored under.".to_string());
+        return Err("A picture needs a name to be stored under.".to_string());
     }
 
     let dir = app
@@ -138,6 +182,41 @@ fn has_audio(path: &str) -> bool {
         Ok(out) => !String::from_utf8_lossy(&out.stdout).trim().is_empty(),
         Err(_) => false,
     }
+}
+
+/// Normal speed, for a plan written before clips could have one.
+fn one() -> f64 {
+    1.0
+}
+
+/// Playing faster or slower without the voices going with it.
+///
+/// `atempo` is the filter that changes the pace of sound while leaving its
+/// pitch alone, which is the whole point: a recording at double speed
+/// should take half as long, not come out an octave higher. It is only
+/// dependable between half and double, so anything further is reached by
+/// chaining several of them — two halvings for a quarter speed, two
+/// doublings for four times.
+fn tempo_chain(speed: f64) -> String {
+    if (speed - 1.0).abs() < 1e-6 {
+        return String::new();
+    }
+    let mut steps: Vec<f64> = Vec::new();
+    let mut left = speed;
+    while left > 2.0 {
+        steps.push(2.0);
+        left /= 2.0;
+    }
+    while left < 0.5 {
+        steps.push(0.5);
+        left *= 2.0;
+    }
+    steps.push(left);
+    steps
+        .iter()
+        .map(|step| format!("atempo={step:.6}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn even(value: f64) -> i64 {
@@ -237,6 +316,50 @@ fn travelling(
 }
 
 /// Turns the plan into ffmpeg's arguments.
+/// Adds one input to the command and answers with the index ffmpeg will
+/// know it by.
+///
+/// The indices matter: every reference in the filter chain is written as
+/// `[n:v]`, so they have to be handed out in the same order the inputs are
+/// pushed rather than assumed to match the position of a clip in the plan.
+/// The backdrop is an input too, and it comes first.
+fn add_input(
+    args: &mut Vec<String>,
+    count: &mut usize,
+    path: &str,
+    // Some(seconds) when it is a still with no length of its own.
+    still_for: Option<f64>,
+) -> usize {
+    if let Some(seconds) = still_for {
+        args.push("-loop".into());
+        args.push("1".into());
+        args.push("-t".into());
+        args.push(format!("{seconds:.4}"));
+    }
+    args.push("-i".into());
+    args.push(path.to_string());
+    let index = *count;
+    *count += 1;
+    index
+}
+
+/// The alpha of a rounded rectangle, as an expression `geq` can evaluate.
+///
+/// Worked in the clip's own pixels, before it is scaled onto the stage, so
+/// the mask is made once from a single frame instead of on every frame of
+/// a moving picture. `radius` is given in the finished frame's pixels and
+/// `layer_width` is how wide the clip ends up there, which is what turns
+/// one into the other.
+///
+/// The half-pixel in the middle is a soft edge: without it the corners
+/// come out as a staircase.
+fn rounded_alpha(radius: f64, layer_width: f64) -> String {
+    let r = format!("({:.4}*W/{:.4})", radius, layer_width);
+    format!(
+        "clip(255*({r}+0.5-hypot(         max(max({r}-X,X-(W-1-{r})),0),         max(max({r}-Y,Y-(H-1-{r})),0))),0,255)"
+    )
+}
+
 fn build_args(plan: &ExportPlan) -> Result<Vec<String>, String> {
     if plan.clips.is_empty() {
         return Err("There is nothing on the timeline to export.".to_string());
@@ -257,16 +380,30 @@ fn build_args(plan: &ExportPlan) -> Result<Vec<String>, String> {
     }
 
     let mut args: Vec<String> = vec!["-y".into(), "-hide_banner".into()];
-    for clip in &plan.clips {
-        if clip.still {
-            args.push("-loop".into());
-            args.push("1".into());
-            args.push("-t".into());
-            args.push(format!("{:.4}", clip.duration));
-        }
-        args.push("-i".into());
-        args.push(clip.path.clone());
-    }
+    let mut input_count = 0usize;
+    // The backdrop goes in first so that the numbering is settled before
+    // any clip is added, and so it is there to be laid everything else on.
+    let backdrop_input = if audio_only {
+        None
+    } else {
+        plan.backdrop
+            .as_deref()
+            .map(|path| add_input(&mut args, &mut input_count, path, Some(plan.duration)))
+    };
+    let clip_inputs: Vec<usize> = plan
+        .clips
+        .iter()
+        .map(|clip| {
+            // A still is held for as long as it is shown, the hold for the
+            // clip arriving over it included.
+            let still_for = if clip.still {
+                Some(clip.duration + clip.hold)
+            } else {
+                None
+            };
+            add_input(&mut args, &mut input_count, &clip.path, still_for)
+        })
+        .collect();
 
     let mut chains: Vec<String> = Vec::new();
     // Names the stage the picture has reached, so each layer knows what to
@@ -274,21 +411,37 @@ fn build_args(plan: &ExportPlan) -> Result<Vec<String>, String> {
     let mut last_video;
 
     if !audio_only {
-        // A black canvas of the chosen size for the full length, which
-        // every layer is laid over. It is also what shows through wherever
-        // the timeline is empty.
-        chains.push(format!(
-            "color=c=black:s={}x{}:r={}:d={:.4}[bg]",
-            plan.width, plan.height, plan.fps, plan.duration
-        ));
+        // What everything is laid over, and what shows through wherever
+        // the timeline is empty: the backdrop the editor painted, or a
+        // black canvas when the project has none.
+        match backdrop_input {
+            Some(input) => chains.push(format!(
+                "[{input}:v]scale={w}:{h},setsar=1,fps={fps}[bg]",
+                input = input,
+                w = plan.width,
+                h = plan.height,
+                fps = plan.fps,
+            )),
+            None => chains.push(format!(
+                "color=c=black:s={}x{}:r={}:d={:.4}[bg]",
+                plan.width, plan.height, plan.fps, plan.duration
+            )),
+        }
         last_video = "bg".to_string();
+
+        let stage = &plan.stage;
 
         for (index, clip) in plan.clips.iter().enumerate() {
             if !clip.visual {
                 continue;
             }
+            let input = clip_inputs[index];
             let zooms = !clip.zoom.is_empty();
 
+            // Sized against the stage rather than the whole frame: a clip
+            // at full size fills the picture inside the padding, which is
+            // exactly what the preview shows.
+            //
             // A clip that zooms is scaled afresh on every frame; one that
             // holds still is scaled once, which is far cheaper and is what
             // nearly every clip does.
@@ -297,12 +450,81 @@ fn build_args(plan: &ExportPlan) -> Result<Vec<String>, String> {
                 // its first frame at zero, and the scaling happens before
                 // the padding that moves it onto the timeline.
                 format!(
-                    "scale=w='{}*({})':h=-2:eval=frame",
-                    plan.width,
+                    "scale=w='{:.2}*({})':h=-2:eval=frame",
+                    stage.width,
                     travelling(&clip.zoom, 0.0, |point| point.scale),
                 )
             } else {
-                format!("scale={}:-2", even(plan.width as f64 * clip.scale).max(2))
+                format!("scale={}:-2", even(stage.width * clip.scale).max(2))
+            };
+
+            // The corners, cut out of the clip before it is scaled.
+            //
+            // Doing it before means the shape is worked out once, from a
+            // single frame, rather than for every pixel of every frame —
+            // and it means the mask is always exactly the size of the
+            // picture it belongs to, with no arithmetic on this side left
+            // to disagree with what `scale` decided.
+            // Beyond its own end when the clip after it arrives with a
+            // transition: it keeps playing underneath for that long.
+            let shown = clip.duration + clip.hold;
+            // How much of the file that takes, and the stretching that
+            // turns it back into that much time on the timeline. Every
+            // figure after this point is in timeline seconds again, which
+            // is what lets the fades, the freeze and the travelling framing
+            // all be written without a thought for the speed.
+            let speed = if clip.speed > 0.0 { clip.speed } else { 1.0 };
+            let material = shown * speed;
+            let pacing = if (speed - 1.0).abs() < 1e-6 {
+                "setpts=PTS-STARTPTS".to_string()
+            } else {
+                format!("setpts=(PTS-STARTPTS)/{speed:.6}")
+            };
+
+            // Fades are written in the clip's own time, which `setpts` has
+            // already rebased to zero. The one at the end is measured from
+            // the clip's own end, not from the end of the hold: the hold is
+            // there to be faded over, not to be faded.
+            let mut fades = String::new();
+            if clip.fade_in > 0.0 {
+                fades.push_str(&format!(
+                    "fade=t=in:st=0:d={:.4}:alpha=1,",
+                    clip.fade_in
+                ));
+            }
+            if clip.fade_out > 0.0 {
+                fades.push_str(&format!(
+                    "fade=t=out:st={:.4}:d={:.4}:alpha=1,",
+                    (clip.duration - clip.fade_out).max(0.0),
+                    clip.fade_out
+                ));
+            }
+
+            // When the file runs out before the hold does, the last frame
+            // stands in for the rest.
+            let freeze = if clip.freeze > 0.0 && !clip.still {
+                format!(
+                    "tpad=stop_mode=clone:stop_duration={:.4},",
+                    clip.freeze
+                )
+            } else {
+                String::new()
+            };
+
+            let layer_width = stage.width * clip.scale;
+            let rounds = clip.rounded && plan.radius >= 0.5 && layer_width >= 1.0;
+            // Joins the picture to whatever comes next: a bare comma when
+            // the corners are square, otherwise a detour that forks off a
+            // single frame, turns it into the mask, and merges it back in
+            // as the alpha channel.
+            let rounding = if rounds {
+                format!(
+                    ",split[c{index}][k{index}];[k{index}]trim=end_frame=1,format=gray,geq=lum='{alpha}'[m{index}];[c{index}][m{index}]alphamerge,",
+                    index = index,
+                    alpha = rounded_alpha(plan.radius, layer_width),
+                )
+            } else {
+                ",".to_string()
             };
 
             // Padded with transparent frames up to its place on the
@@ -315,37 +537,49 @@ fn build_args(plan: &ExportPlan) -> Result<Vec<String>, String> {
                 // frame and holds every later one to it — a zoom would
                 // simply not zoom, quietly and without any error. It is
                 // needed at all so that `tpad` can pad with transparency
-                // rather than with black.
-                "[{index}:v]trim=start={trim:.4}:duration={dur:.4},setpts=PTS-STARTPTS,                 format=rgba,{sizing},setsar=1,fps={fps},                 tpad=start_duration={start:.4}:start_mode=add:color=black@0[v{index}]",
+                // rather than with black, and so the rounded corners and
+                // the fades have an alpha channel to work on. The fades
+                // come after the corners: `alphamerge` sets the alpha
+                // outright, so a fade applied before it would be thrown
+                // away by the mask.
+                "[{input}:v]trim=start={trim:.4}:duration={dur:.4},{pacing},{freeze}format=rgba{rounding}{fades}{sizing},setsar=1,fps={fps},tpad=start_duration={start:.4}:start_mode=add:color=black@0[v{index}]",
+                input = input,
                 index = index,
                 trim = clip.trim_start,
-                dur = clip.duration,
+                dur = material,
+                pacing = pacing,
+                freeze = freeze,
+                rounding = rounding,
+                fades = fades,
                 sizing = sizing,
                 fps = plan.fps,
                 start = clip.start,
             ));
 
-            // The framing gives the centre of the layer; overlay wants its
-            // top-left, so half its own size comes back off. Overlay reads
-            // the timeline's clock, so a travelling position has to be
-            // offset by where the clip begins.
+            // The framing gives the centre of the layer within the stage;
+            // overlay wants its top-left in the whole frame, so the stage
+            // is added back on and half the layer's own size comes off.
+            // Overlay reads the timeline's clock, so a travelling position
+            // has to be offset by where the clip begins.
             let (position_x, position_y) = if zooms {
                 (
                     format!(
-                        "'(0.5+({}))*{}-overlay_w/2'",
+                        "'{:.2}+(0.5+({}))*{:.2}-overlay_w/2'",
+                        stage.x,
                         travelling(&clip.zoom, clip.start, |point| point.x),
-                        plan.width
+                        stage.width
                     ),
                     format!(
-                        "'(0.5+({}))*{}-overlay_h/2'",
+                        "'{:.2}+(0.5+({}))*{:.2}-overlay_h/2'",
+                        stage.y,
                         travelling(&clip.zoom, clip.start, |point| point.y),
-                        plan.height
+                        stage.height
                     ),
                 )
             } else {
                 (
-                    format!("{:.2}-overlay_w/2", (0.5 + clip.x) * plan.width as f64),
-                    format!("{:.2}-overlay_h/2", (0.5 + clip.y) * plan.height as f64),
+                    format!("{:.2}-overlay_w/2", stage.x + (0.5 + clip.x) * stage.width),
+                    format!("{:.2}-overlay_h/2", stage.y + (0.5 + clip.y) * stage.height),
                 )
             };
 
@@ -384,15 +618,25 @@ fn build_args(plan: &ExportPlan) -> Result<Vec<String>, String> {
                 continue;
             }
             let level = volume_filter(&clip.volume);
+            let speed = if clip.speed > 0.0 { clip.speed } else { 1.0 };
             // The volume line is read before the clip is moved into place,
             // so its times are the clip's own — which is how the editor
             // draws it.
             let mut chain = format!(
-                "[{index}:a]atrim=start={trim:.4}:duration={dur:.4},asetpts=PTS-STARTPTS",
-                index = index,
+                "[{input}:a]atrim=start={trim:.4}:duration={dur:.4},asetpts=PTS-STARTPTS",
+                input = clip_inputs[index],
                 trim = clip.trim_start,
-                dur = clip.duration,
+                dur = clip.duration * speed,
             );
+            // Paced before the volume line is applied, not after: the line
+            // is drawn against the clip on the timeline, and until the
+            // sound has been brought back to that pace its own clock is
+            // running at the speed of the file.
+            let tempo = tempo_chain(speed);
+            if !tempo.is_empty() {
+                chain.push(',');
+                chain.push_str(&tempo);
+            }
             if !level.is_empty() {
                 chain.push(',');
                 chain.push_str(&level);
@@ -595,6 +839,12 @@ mod tests {
             visual: true,
             audible: true,
             still: false,
+            rounded: false,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            hold: 0.0,
+            freeze: 0.0,
+            speed: 1.0,
             scale: 1.0,
             x: 0.0,
             y: 0.0,
@@ -603,12 +853,27 @@ mod tests {
         }
     }
 
+    /// The stage of a project with no padding: the whole frame.
+    fn full_frame(width: u32, height: u32) -> PlanRect {
+        PlanRect {
+            x: 0.0,
+            y: 0.0,
+            width: width as f64,
+            height: height as f64,
+        }
+    }
+
+    /// A plan with no padding, so the stage is the whole frame. Tests that
+    /// care about padding set their own stage.
     fn plan(format: &str, clips: Vec<PlanClip>) -> ExportPlan {
         ExportPlan {
             output_path: "out.mp4".into(),
             format: format.into(),
             width: 1280,
             height: 720,
+            stage: full_frame(1280, 720),
+            radius: 0.0,
+            backdrop: None,
             fps: 30,
             duration: 10.0,
             video_quality: 23,
@@ -685,6 +950,9 @@ mod tests {
         p.duration = 4.0;
         p.width = 640;
         p.height = 360;
+        // In step with the frame, or every placement would be worked out
+        // against a stage twice the size of the picture it lands on.
+        p.stage = full_frame(p.width, p.height);
         p.fps = 24;
         mutate(&mut p);
 
@@ -789,6 +1057,28 @@ args: {}",
         status.status.success().then(|| out.to_string_lossy().to_string())
     }
 
+    /// A single flat-coloured picture on disk, to stand in for a backdrop.
+    fn colour_picture(name: &str, colour: &str, width: u32, height: u32) -> Option<String> {
+        let out = std::env::temp_dir().join(name);
+        let status = crate::sidecar::command("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("color=c={colour}:s={width}x{height}:d=1"),
+                "-frames:v",
+                "1",
+                &out.to_string_lossy(),
+            ])
+            .output()
+            .ok()?;
+        status
+            .status
+            .success()
+            .then(|| out.to_string_lossy().to_string())
+    }
+
     /// The colour of one pixel of a rendered file, at a moment.
     fn pixel_at(path: &str, seconds: f64, x: u32, y: u32) -> (u8, u8, u8) {
         let out = crate::sidecar::command("ffmpeg")
@@ -833,6 +1123,7 @@ args: {}",
         p.output_path = out.to_string_lossy().to_string();
         p.width = 640;
         p.height = 360;
+        p.stage = full_frame(p.width, p.height);
         p.fps = 24;
         p.duration = 4.0;
 
@@ -913,6 +1204,7 @@ args: {}",
         p.output_path = out.to_string_lossy().to_string();
         p.width = 640;
         p.height = 360;
+        p.stage = full_frame(p.width, p.height);
         p.fps = 24;
         p.duration = 4.0;
 
@@ -983,6 +1275,7 @@ args: {}",
         p.output_path = out.to_string_lossy().to_string();
         p.width = 640;
         p.height = 360;
+        p.stage = full_frame(p.width, p.height);
         p.fps = 24;
         p.duration = 4.0;
 
@@ -1050,6 +1343,7 @@ args: {}",
         p.output_path = out.to_string_lossy().to_string();
         p.width = 640;
         p.height = 360;
+        p.stage = full_frame(p.width, p.height);
         p.fps = 24;
         p.duration = 4.0;
 
@@ -1096,5 +1390,637 @@ args: {}",
         // H.264 cannot encode an odd number of pixels.
         assert_eq!(even(1279.0), 1280);
         assert_eq!(even(640.4), 640);
+    }
+
+    /// A project with padding, rendered and then looked at.
+    ///
+    /// Everything about the backdrop is a promise the preview makes on the
+    /// export's behalf: that the picture is inset by this much, that this
+    /// colour is what shows around it, that the corners are cut. The only
+    /// way to know the promise is kept is to render a frame and read the
+    /// pixels back.
+    ///
+    /// A stage of 480x270 inset into a 640x360 frame — the frame's own
+    /// shape, an eighth in on every side — is used throughout, so the
+    /// numbers below can be read off by hand.
+    fn padded_plan(clip_path: &str, backdrop: Option<String>, radius: f64) -> ExportPlan {
+        let mut p = plan("mp4", vec![clip(clip_path, 0.0, 4.0)]);
+        p.clips[0].audible = false;
+        p.clips[0].rounded = true;
+        p.width = 640;
+        p.height = 360;
+        p.fps = 24;
+        p.duration = 4.0;
+        p.stage = PlanRect {
+            x: 80.0,
+            y: 45.0,
+            width: 480.0,
+            height: 270.0,
+        };
+        p.radius = radius;
+        p.backdrop = backdrop;
+        p
+    }
+
+    fn run_plan(p: &ExportPlan) {
+        let args = build_args(p).expect("args");
+        let run = crate::sidecar::command("ffmpeg")
+            .args(&args)
+            .stderr(Stdio::piped())
+            .output()
+            .expect("ffmpeg ran");
+        assert!(
+            run.status.success(),
+            "{}
+args: {}",
+            String::from_utf8_lossy(&run.stderr),
+            args.join(" ")
+        );
+    }
+
+    const GREEN: (u8, u8, u8) = (0, 128, 0);
+    const BLUE: (u8, u8, u8) = (0, 0, 255);
+
+    #[test]
+    fn padding_lets_the_backdrop_show_around_the_footage() {
+        let (Some(blue), Some(green)) = (
+            colour_source("jd-pad-blue.mp4", "blue"),
+            colour_picture("jd-pad-backdrop.png", "green", 640, 360),
+        ) else {
+            eprintln!("no ffmpeg to make test sources with; skipping");
+            return;
+        };
+
+        let mut p = padded_plan(&blue, Some(green), 0.0);
+        let out = std::env::temp_dir().join("jd-padded.mp4");
+        p.output_path = out.to_string_lossy().to_string();
+        run_plan(&p);
+
+        // Outside the stage on every side: the backdrop.
+        for (x, y, where_) in [
+            (10, 180, "left of the stage"),
+            (620, 180, "right of the stage"),
+            (320, 10, "above the stage"),
+            (320, 340, "below the stage"),
+        ] {
+            assert!(
+                looks_like(pixel_at(&p.output_path, 2.0, x, y), GREEN),
+                "the backdrop should show {where_}"
+            );
+        }
+
+        // Inside it: the footage, right up to the edge.
+        for (x, y, where_) in [
+            (320, 180, "in the middle"),
+            (84, 180, "just inside the left edge"),
+            (554, 180, "just inside the right edge"),
+            (320, 49, "just inside the top edge"),
+            (320, 309, "just inside the bottom edge"),
+        ] {
+            assert!(
+                looks_like(pixel_at(&p.output_path, 2.0, x, y), BLUE),
+                "the footage should reach {where_}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_corner_radius_cuts_the_footage_and_not_the_frame() {
+        let (Some(blue), Some(green)) = (
+            colour_source("jd-round-blue.mp4", "blue"),
+            colour_picture("jd-round-backdrop.png", "green", 640, 360),
+        ) else {
+            eprintln!("no ffmpeg to make test sources with; skipping");
+            return;
+        };
+
+        // The stage's top-left corner is at (80, 45). With a radius of 40
+        // the corner arc is centred on (120, 85), so a point 2px in from
+        // the corner is nearly 14px outside the arc — far enough that no
+        // amount of smoothing or colour subsampling could account for it.
+        let square = {
+            let mut p = padded_plan(&blue, Some(green.clone()), 0.0);
+            let out = std::env::temp_dir().join("jd-square-corner.mp4");
+            p.output_path = out.to_string_lossy().to_string();
+            run_plan(&p);
+            pixel_at(&p.output_path, 2.0, 82, 47)
+        };
+        let rounded = {
+            let mut p = padded_plan(&blue, Some(green), 40.0);
+            let out = std::env::temp_dir().join("jd-round-corner.mp4");
+            p.output_path = out.to_string_lossy().to_string();
+            run_plan(&p);
+            (
+                pixel_at(&p.output_path, 2.0, 82, 47),
+                pixel_at(&p.output_path, 2.0, 120, 85),
+                pixel_at(&p.output_path, 2.0, 84, 180),
+            )
+        };
+
+        assert!(
+            looks_like(square, BLUE),
+            "with no radius the corner is footage, got {square:?}"
+        );
+        assert!(
+            looks_like(rounded.0, GREEN),
+            "the radius should cut the corner away, got {:?}",
+            rounded.0
+        );
+        assert!(
+            looks_like(rounded.1, BLUE),
+            "inside the arc is still footage, got {:?}",
+            rounded.1
+        );
+        assert!(
+            looks_like(rounded.2, BLUE),
+            "a straight edge is untouched by the radius, got {:?}",
+            rounded.2
+        );
+    }
+
+    #[test]
+    fn a_half_size_layer_is_half_the_stage_not_half_the_frame() {
+        let (Some(red), Some(blue)) = (
+            colour_source("jd-stage-red.mp4", "red"),
+            colour_source("jd-stage-blue.mp4", "blue"),
+        ) else {
+            eprintln!("no ffmpeg to make test sources with; skipping");
+            return;
+        };
+
+        let mut p = padded_plan(&red, None, 0.0);
+        let mut over = clip(&blue, 0.0, 4.0);
+        over.audible = false;
+        over.scale = 0.5;
+        p.clips.push(over);
+        let out = std::env::temp_dir().join("jd-stage-scale.mp4");
+        p.output_path = out.to_string_lossy().to_string();
+        run_plan(&p);
+
+        // Half of the 480-wide stage is 240, centred on the stage's own
+        // middle at x=320: so it covers 200..440. Half the frame would
+        // have covered 160..480, which is what the check at 180 rules out.
+        const RED: (u8, u8, u8) = (255, 0, 0);
+        assert!(
+            looks_like(pixel_at(&p.output_path, 2.0, 320, 180), BLUE),
+            "the middle of the overlay should be the overlay"
+        );
+        assert!(
+            looks_like(pixel_at(&p.output_path, 2.0, 210, 180), BLUE),
+            "the overlay should reach x=210"
+        );
+        assert!(
+            looks_like(pixel_at(&p.output_path, 2.0, 180, 180), RED),
+            "the overlay should not reach x=180 — that would be half the frame"
+        );
+    }
+
+    /// Two clips that meet, with the second arriving over the first.
+    ///
+    /// A transition is the one thing in the editor that cannot be checked
+    /// by reading the filtergraph: whether it dissolves or cuts depends on
+    /// whether the clip underneath is still being drawn, and the only way
+    /// to know is to look at a frame in the middle of it. Two flat colours
+    /// make the answer a single pixel.
+    fn dissolving_pair(fade: f64, hold: f64, freeze: f64) -> Option<String> {
+        let (Some(red), Some(blue)) = (
+            colour_source("jd-xf-red.mp4", "red"),
+            colour_source("jd-xf-blue.mp4", "blue"),
+        ) else {
+            return None;
+        };
+
+        let mut first = clip(&red, 0.0, 2.0);
+        first.audible = false;
+        first.hold = hold;
+        first.freeze = freeze;
+
+        let mut second = clip(&blue, 2.0, 2.0);
+        second.audible = false;
+        second.fade_in = fade;
+
+        let mut p = plan("mp4", vec![first, second]);
+        p.width = 640;
+        p.height = 360;
+        p.stage = full_frame(p.width, p.height);
+        p.fps = 24;
+        p.duration = 4.0;
+        let out = std::env::temp_dir().join(format!("jd-xfade-{fade}-{hold}.mp4"));
+        p.output_path = out.to_string_lossy().to_string();
+        run_plan(&p);
+        Some(p.output_path)
+    }
+
+    fn between(got: (u8, u8, u8), a: (u8, u8, u8), b: (u8, u8, u8)) -> bool {
+        let mid = |x: u8, y: u8| (x as i32 + y as i32) / 2;
+        let close = |got: u8, want: i32| (got as i32 - want).abs() < 45;
+        close(got.0, mid(a.0, b.0)) && close(got.1, mid(a.1, b.1)) && close(got.2, mid(a.2, b.2))
+    }
+
+    #[test]
+    fn a_dissolve_shows_both_clips_at_once() {
+        const RED: (u8, u8, u8) = (255, 0, 0);
+        const BLUE: (u8, u8, u8) = (0, 0, 255);
+
+        let Some(faded) = dissolving_pair(1.0, 1.0, 0.0) else {
+            eprintln!("no ffmpeg to make test sources with; skipping");
+            return;
+        };
+        // A plain cut at the same moment, to show the difference is the
+        // transition and not something about the two files.
+        let Some(cut) = dissolving_pair(0.0, 0.0, 0.0) else {
+            return;
+        };
+
+        let half = pixel_at(&faded, 2.5, 318, 178);
+        assert!(
+            between(half, RED, BLUE),
+            "halfway through a dissolve should be halfway between the two clips, got {half:?}"
+        );
+
+        // Just after the cut the outgoing clip is still nearly all of it —
+        // which is only possible if it is still being drawn underneath.
+        let early = pixel_at(&faded, 2.1, 318, 178);
+        assert!(
+            looks_like(early, RED),
+            "a tenth into the dissolve should still be mostly the first clip, got {early:?}"
+        );
+
+        // And by the end of it, none of the first clip is left.
+        let done = pixel_at(&faded, 3.2, 318, 178);
+        assert!(
+            looks_like(done, BLUE),
+            "past the dissolve only the second clip is left, got {done:?}"
+        );
+
+        // Without the transition the same moments are a hard cut.
+        assert!(
+            looks_like(pixel_at(&cut, 2.1, 318, 178), BLUE),
+            "a cut is a cut: no trace of the clip before it"
+        );
+    }
+
+    #[test]
+    fn a_held_clip_freezes_when_its_file_runs_out() {
+        const RED: (u8, u8, u8) = (255, 0, 0);
+        const BLUE: (u8, u8, u8) = (0, 0, 255);
+        // Nothing held from the file at all: every held frame is a clone
+        // of the last one. The picture should still be there.
+        let Some(frozen) = dissolving_pair(1.0, 0.0, 1.0) else {
+            eprintln!("no ffmpeg to make test sources with; skipping");
+            return;
+        };
+        let half = pixel_at(&frozen, 2.5, 318, 178);
+        assert!(
+            between(half, RED, BLUE),
+            "a frozen last frame should dissolve just the same, got {half:?}"
+        );
+    }
+
+    #[test]
+    fn a_clip_can_fade_away_to_the_backdrop() {
+        let (Some(blue), Some(green)) = (
+            colour_source("jd-out-blue.mp4", "blue"),
+            colour_picture("jd-out-backdrop.png", "green", 640, 360),
+        ) else {
+            eprintln!("no ffmpeg to make test sources with; skipping");
+            return;
+        };
+
+        let mut only = clip(&blue, 0.0, 4.0);
+        only.audible = false;
+        only.fade_out = 1.0;
+        let mut p = plan("mp4", vec![only]);
+        p.width = 640;
+        p.height = 360;
+        p.stage = full_frame(p.width, p.height);
+        p.fps = 24;
+        p.duration = 4.0;
+        p.backdrop = Some(green);
+        let out = std::env::temp_dir().join("jd-fadeout.mp4");
+        p.output_path = out.to_string_lossy().to_string();
+        run_plan(&p);
+
+        const GREEN: (u8, u8, u8) = (0, 128, 0);
+        const BLUE: (u8, u8, u8) = (0, 0, 255);
+        assert!(
+            looks_like(pixel_at(&p.output_path, 1.0, 318, 178), BLUE),
+            "before the fade it is the clip"
+        );
+        assert!(
+            between(pixel_at(&p.output_path, 3.5, 318, 178), BLUE, GREEN),
+            "halfway out it is half the backdrop"
+        );
+        assert!(
+            looks_like(pixel_at(&p.output_path, 3.95, 318, 178), GREEN),
+            "at the very end the backdrop is all that is left"
+        );
+    }
+
+    #[test]
+    fn a_fade_keeps_the_rounded_corners() {
+        let (Some(blue), Some(green)) = (
+            colour_source("jd-rf-blue.mp4", "blue"),
+            colour_picture("jd-rf-backdrop.png", "green", 640, 360),
+        ) else {
+            eprintln!("no ffmpeg to make test sources with; skipping");
+            return;
+        };
+
+        // The mask sets the alpha channel outright and the fade scales it.
+        // In the wrong order one wipes out the other, which would show as
+        // square corners or as no fade at all.
+        let mut p = padded_plan(&blue, Some(green), 40.0);
+        p.clips[0].fade_in = 1.0;
+        let out = std::env::temp_dir().join("jd-round-fade.mp4");
+        p.output_path = out.to_string_lossy().to_string();
+        run_plan(&p);
+
+        const GREEN: (u8, u8, u8) = (0, 128, 0);
+        const BLUE: (u8, u8, u8) = (0, 0, 255);
+        assert!(
+            looks_like(pixel_at(&p.output_path, 2.0, 82, 47), GREEN),
+            "the corner is still cut away once the fade is over"
+        );
+        assert!(
+            looks_like(pixel_at(&p.output_path, 2.0, 320, 180), BLUE),
+            "and the middle is still the footage"
+        );
+        assert!(
+            between(pixel_at(&p.output_path, 0.5, 320, 180), BLUE, GREEN),
+            "halfway through the fade the backdrop shows through"
+        );
+    }
+
+    #[test]
+    fn tempo_is_chained_to_stay_in_the_filters_range() {
+        // atempo is only dependable between half and double, so anything
+        // beyond that has to be reached in steps.
+        assert_eq!(tempo_chain(1.0), "");
+        assert_eq!(tempo_chain(2.0), "atempo=2.000000");
+        assert_eq!(tempo_chain(0.5), "atempo=0.500000");
+        assert_eq!(tempo_chain(4.0), "atempo=2.000000,atempo=2.000000");
+        assert_eq!(tempo_chain(0.25), "atempo=0.500000,atempo=0.500000");
+        assert_eq!(tempo_chain(3.0), "atempo=2.000000,atempo=1.500000");
+        // Whatever the chain, the steps multiply back to what was asked.
+        for speed in [0.25, 0.4, 0.75, 1.5, 2.5, 3.3, 4.0] {
+            let product: f64 = tempo_chain(speed)
+                .split(',')
+                .filter(|part| !part.is_empty())
+                .map(|part| part.trim_start_matches("atempo=").parse::<f64>().unwrap())
+                .product();
+            assert!(
+                (product - speed).abs() < 1e-4,
+                "{speed} came out as {product}"
+            );
+        }
+    }
+
+    /// A source that is red for its first half and blue for its second, so
+    /// that when a moment of it is shown can be read off a single pixel.
+    fn two_halves(name: &str) -> Option<String> {
+        let out = std::env::temp_dir().join(name);
+        let status = crate::sidecar::command("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=640x360:r=24:d=4",
+                "-vf",
+                "drawbox=x=0:y=0:w=640:h=360:color=blue@1:t=fill:enable='gte(t,2)'",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                &out.to_string_lossy(),
+            ])
+            .output()
+            .ok()?;
+        status
+            .status
+            .success()
+            .then(|| out.to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn speed_plays_more_of_the_file_in_less_time() {
+        const RED: (u8, u8, u8) = (255, 0, 0);
+        const BLUE: (u8, u8, u8) = (0, 0, 255);
+        let Some(source) = two_halves("jd-halves.mp4") else {
+            eprintln!("no ffmpeg to make test sources with; skipping");
+            return;
+        };
+
+        let render = |speed: f64, seconds: f64, name: &str| {
+            let mut only = clip(&source, 0.0, seconds);
+            only.audible = false;
+            only.speed = speed;
+            let mut p = plan("mp4", vec![only]);
+            p.width = 640;
+            p.height = 360;
+            p.stage = full_frame(p.width, p.height);
+            p.fps = 24;
+            p.duration = seconds;
+            p.output_path = std::env::temp_dir()
+                .join(name)
+                .to_string_lossy()
+                .to_string();
+            run_plan(&p);
+            p.output_path
+        };
+
+        // Four seconds of material in two: the change of colour that
+        // happens halfway through the file should happen halfway through
+        // the clip, which is now one second in rather than two.
+        let fast = render(2.0, 2.0, "jd-speed-fast.mp4");
+        assert!(
+            looks_like(pixel_at(&fast, 0.5, 318, 178), RED),
+            "the first half of the file is still the first half of the clip"
+        );
+        assert!(
+            looks_like(pixel_at(&fast, 1.5, 318, 178), BLUE),
+            "at twice speed the second half arrives after one second, not two"
+        );
+
+        // At normal speed the same two seconds show only the first half.
+        let plain = render(1.0, 2.0, "jd-speed-plain.mp4");
+        assert!(
+            looks_like(pixel_at(&plain, 1.5, 318, 178), RED),
+            "at normal speed two seconds is still the first half of the file"
+        );
+
+        // And slowed down, one second of material is stretched over two.
+        let slow = render(0.5, 2.0, "jd-speed-slow.mp4");
+        assert!(
+            looks_like(pixel_at(&slow, 1.9, 318, 178), RED),
+            "at half speed two seconds covers only the first second of the file"
+        );
+    }
+
+    /// The pitch of a file's sound, by counting how often its waveform
+    /// crosses zero: a steady tone crosses twice a cycle, so the count
+    /// over a second is twice its frequency.
+    ///
+    /// Crude for music and exactly right for the single sine wave used
+    /// here, and it needs nothing but the ffmpeg already at hand.
+    fn tone_hz(path: &str) -> f64 {
+        let out = crate::sidecar::command("ffmpeg")
+            .args([
+                "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "16000", "-f",
+                "s16le", "-",
+            ])
+            .output()
+            .expect("ffmpeg ran");
+        let samples: Vec<i16> = out
+            .stdout
+            .chunks_exact(2)
+            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+
+        // Silence at either end — an encoder's padding — crosses zero on
+        // nothing but noise, so the count is taken between the first and
+        // last moment the file is actually sounding.
+        //
+        // The stretch between them is kept whole. Dropping the quiet
+        // samples instead would throw away the very part of each cycle
+        // that crosses zero, and join what was left into a waveform that
+        // crossed far more often than the tone ever did: a 440Hz tone
+        // measured 652Hz that way.
+        let loud = |sample: &i16| sample.unsigned_abs() > 2_000;
+        let Some(first) = samples.iter().position(loud) else {
+            return 0.0;
+        };
+        let last = samples.iter().rposition(loud).unwrap_or(first);
+        let sounding = &samples[first..=last];
+
+        let mut crossings = 0usize;
+        for pair in sounding.windows(2) {
+            if (pair[0] < 0) != (pair[1] < 0) {
+                crossings += 1;
+            }
+        }
+        let seconds = sounding.len() as f64 / 16_000.0;
+        if seconds <= 0.0 {
+            return 0.0;
+        }
+        crossings as f64 / seconds / 2.0
+    }
+
+    #[test]
+    fn sound_changes_pace_without_changing_pitch() {
+        // A steady tone, so that any shift in pitch is a number rather
+        // than an impression.
+        let tone = std::env::temp_dir().join("jd-tone.wav");
+        let made = crate::sidecar::command("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=4:sample_rate=48000",
+                &tone.to_string_lossy(),
+            ])
+            .output();
+        let Ok(made) = made else {
+            eprintln!("no ffmpeg to make a tone with; skipping");
+            return;
+        };
+        if !made.status.success() {
+            eprintln!("could not make a tone; skipping");
+            return;
+        }
+        let tone = tone.to_string_lossy().to_string();
+
+        let before = tone_hz(&tone);
+        assert!(
+            (before - 440.0).abs() < 8.0,
+            "the tone should be 440Hz to start with, measured {before:.1}"
+        );
+
+        let render = |speed: f64, seconds: f64, name: &str| {
+            let mut only = clip(&tone, 0.0, seconds);
+            only.visual = false;
+            only.speed = speed;
+            let mut p = plan("mp3", vec![only]);
+            p.duration = seconds;
+            p.output_path = std::env::temp_dir()
+                .join(name)
+                .to_string_lossy()
+                .to_string();
+            run_plan(&p);
+            p.output_path
+        };
+
+        // Four seconds of tone in two, and again in eight.
+        let fast = render(2.0, 2.0, "jd-tone-fast.mp3");
+        let slow = render(0.5, 8.0, "jd-tone-slow.mp3");
+
+        let fast_hz = tone_hz(&fast);
+        let slow_hz = tone_hz(&slow);
+        println!("440Hz -> {fast_hz:.1} at 2x, {slow_hz:.1} at 0.5x");
+
+        assert!(
+            (fast_hz - 440.0).abs() < 15.0,
+            "at double speed the note should still be 440Hz, not {fast_hz:.1} \
+             (880 would mean it had been played faster like a tape)"
+        );
+        assert!(
+            (slow_hz - 440.0).abs() < 15.0,
+            "at half speed the note should still be 440Hz, not {slow_hz:.1}"
+        );
+
+        // And it really did change pace, rather than being left alone.
+        let length: f64 = probe(&fast, "format=duration").parse().unwrap_or(0.0);
+        assert!(
+            (length - 2.0).abs() < 0.3,
+            "four seconds of tone at double speed should last two, lasted {length:.2}"
+        );
+    }
+
+    #[test]
+    fn a_tall_frame_renders_tall() {
+        let (Some(blue), Some(green)) = (
+            colour_source("jd-tall-blue.mp4", "blue"),
+            colour_picture("jd-tall-backdrop.png", "green", 480, 854),
+        ) else {
+            eprintln!("no ffmpeg to make test sources with; skipping");
+            return;
+        };
+
+        // A phone-shaped frame with widescreen footage in it: the picture
+        // spans the width and the backdrop fills the space above and
+        // below, which is what the preview shows for the same project.
+        let mut only = clip(&blue, 0.0, 4.0);
+        only.audible = false;
+        let mut p = plan("mp4", vec![only]);
+        p.width = 480;
+        p.height = 854;
+        p.stage = full_frame(p.width, p.height);
+        p.fps = 24;
+        p.duration = 4.0;
+        p.backdrop = Some(green);
+        let out = std::env::temp_dir().join("jd-tall.mp4");
+        p.output_path = out.to_string_lossy().to_string();
+        run_plan(&p);
+
+        let shape = probe(&p.output_path, "stream=width,height");
+        assert!(shape.contains("480,854"), "wrong canvas: {shape}");
+
+        const GREEN: (u8, u8, u8) = (0, 128, 0);
+        const BLUE: (u8, u8, u8) = (0, 0, 255);
+        // 480 wide of 16:9 footage is 270 tall, centred: rows 292 to 562.
+        assert!(
+            looks_like(pixel_at(&p.output_path, 2.0, 238, 426), BLUE),
+            "the middle of a tall frame is the footage"
+        );
+        assert!(
+            looks_like(pixel_at(&p.output_path, 2.0, 238, 100), GREEN),
+            "above it is the backdrop"
+        );
+        assert!(
+            looks_like(pixel_at(&p.output_path, 2.0, 238, 750), GREEN),
+            "and below it too"
+        );
     }
 }

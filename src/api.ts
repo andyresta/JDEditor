@@ -8,6 +8,7 @@ import type {
   ExportFormat,
   ExportPlan,
   DeviceList,
+  WindowInfo,
   MediaPrepared,
   Rect,
   RecordingConfig,
@@ -19,6 +20,8 @@ export const api = {
   checkFfmpeg: () => invoke<boolean>("check_ffmpeg"),
   debugDeviceScan: () => invoke<string>("debug_device_scan"),
   listDevices: () => invoke<DeviceList>("list_devices"),
+  /** The windows on screen, for pointing a recording at one of them. */
+  listWindows: () => invoke<WindowInfo[]>("list_windows"),
   startRecording: (config: RecordingConfig) =>
     invoke<string>("start_recording", { config }),
   pauseRecording: () => invoke<void>("pause_recording"),
@@ -41,14 +44,22 @@ export const api = {
     open({ multiple: true, filters: IMPORT_FILTERS[kind] }) as Promise<
       string[] | null
     >,
-  /** One file, for putting a clip back in touch with media that moved. */
-  pickMediaFile: (name: string) =>
+  /** One file, for putting a clip back in touch with media that moved.
+   *
+   * Filtered by what went missing: a dialog offering only video would not
+   * show the .mp3 it is asking the user to find. */
+  pickMediaFile: (name: string, kind: "visual" | "audio" = "visual") =>
     open({
       multiple: false,
       title: `Where is ${name}?`,
-      filters: IMPORT_FILTERS.visual,
+      filters: IMPORT_FILTERS[kind],
     }) as Promise<string | null>,
   pathExists: (path: string) => invoke<boolean>("path_exists", { path }),
+  /** The editor's copy of work that has not been saved yet. One slot, in
+   * the app's own folder — never beside the user's project. */
+  writeRecovery: (contents: string) => invoke<void>("write_recovery", { contents }),
+  readRecovery: () => invoke<string | null>("read_recovery"),
+  clearRecovery: () => invoke<void>("clear_recovery"),
   pickProjectFile: () =>
     open({
       multiple: false,
@@ -70,8 +81,10 @@ export const api = {
       defaultPath: suggested,
       filters: [{ name: format.toUpperCase(), extensions: [format] }],
     }),
-  writeTextImage: (clipId: string, bytes: number[]) =>
-    invoke<string>("write_text_image", { clipId, bytes }),
+  /** Stores a full-frame picture the editor drew — a title, or the
+   * backdrop — where the renderer can overlay it. */
+  writeOverlayImage: (name: string, bytes: number[]) =>
+    invoke<string>("write_overlay_image", { name, bytes }),
   exportTimeline: (plan: ExportPlan) => invoke<string>("export_timeline", { plan }),
   cancelExport: () => invoke<void>("cancel_export"),
   revealFile: (path: string) => revealItemInDir(path),

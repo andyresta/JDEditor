@@ -28,9 +28,22 @@ export interface DeviceList {
   audio_inputs: DeviceInfo[];
 }
 
+/** A window on screen that a recording can be pointed at. */
+export interface WindowInfo {
+  /** Its title bar, which is both how a person recognises it and how the
+   * capture is asked for it. */
+  title: string;
+  /** The program it belongs to, for telling two of the same name apart. */
+  app: string;
+}
+
 export interface RecordingConfig {
   screen_id: string;
   area: Rect | null;
+  /** One window, by its title, instead of the screen. */
+  window_title: string | null;
+  /** The camera on its own, with no screen in the recording. */
+  camera_only: boolean;
   include_webcam: boolean;
   webcam_id: string | null;
   include_audio: boolean;
@@ -143,7 +156,35 @@ export type BackdropCategory = (typeof BACKDROP_CATEGORIES)[number];
 
 /** Editor appearance and timeline state. Saved as part of the project, so
  * reopening a `.jd` file restores how it looked. */
+/* ------------------------------------------------------------ frame shape */
+
+/** The shape of the picture, written as it is spoken.
+ *
+ * It belongs to the project rather than to the export, because it decides
+ * what the preview is showing: a film being cut for a phone has to be cut
+ * against a tall frame, not against a wide one that is squeezed into a
+ * tall file at the last moment.
+ */
+export const FRAME_SHAPES = ["16:9", "9:16", "1:1", "4:5"] as const;
+export type FrameShape = (typeof FRAME_SHAPES)[number];
+
+export const FRAME_SHAPE_LABELS: Record<FrameShape, string> = {
+  "16:9": "Widescreen",
+  "9:16": "Portrait",
+  "1:1": "Square",
+  "4:5": "Tall",
+};
+
+/** Width over height. */
+export function shapeRatio(shape: FrameShape): number {
+  const [width, height] = shape.split(":").map(Number);
+  return height > 0 ? width / height : 16 / 9;
+}
+
 export interface EditorSettings {
+  /** The shape of the picture. Absent in projects made before there was a
+   * choice, which were all widescreen. */
+  aspect: FrameShape;
   backdropKind: BackdropKind;
   category: BackdropCategory;
   swatch: number;
@@ -153,6 +194,7 @@ export interface EditorSettings {
 }
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
+  aspect: "16:9",
   backdropKind: "Wallpaper",
   category: "Cities",
   swatch: 0,
@@ -201,6 +243,21 @@ export interface TimelineClip {
    * is what tells it apart from a video clip that simply happens to have
    * been dropped on an audio track. */
   soundOnly?: boolean;
+  /** How the clip arrives, and how it leaves. Absent means it simply cuts,
+   * which is what every clip does until a transition is put on it. */
+  transitionIn?: Transition;
+  transitionOut?: Transition;
+  /** How fast it plays. 1, and so usually absent, until it is changed.
+   *
+   * It is the one property that makes a clip's length on the timeline
+   * differ from the length of the material behind it, which is why every
+   * conversion between the two goes through `mediaTimeAt` and `mediaSpan`
+   * rather than being written out where it is needed. */
+  speed?: number;
+  /** The video clip this one's sound was split off from. Set when Split
+   * Audio makes it, so that changing the video's speed can change this
+   * one's too and the two stay together. */
+  sourceClipId?: string;
 }
 
 /** A clip's place in the preview frame, so clips on higher tracks can be
@@ -254,6 +311,218 @@ export const DEFAULT_TEXT_SECONDS = 5;
 
 export function isTextClip(clip: TimelineClip): boolean {
   return clip.text != null;
+}
+
+/* ------------------------------------------------------------ transitions */
+
+/** How a clip can arrive or leave.
+ *
+ * Each one is a movement of the same three things the editor already
+ * animates — where the layer sits, how big it is, and how solid it is — so
+ * a transition is not a separate kind of effect with its own renderer. It
+ * is a framing that changes over a second, which is exactly what a zoom
+ * is, and it is carried to the finished file the same way.
+ */
+export const TRANSITIONS = [
+  "dissolve",
+  "slide-left",
+  "slide-right",
+  "slide-up",
+  "slide-down",
+  "zoom",
+] as const;
+export type TransitionKind = (typeof TRANSITIONS)[number];
+
+export const TRANSITION_LABELS: Record<TransitionKind, string> = {
+  dissolve: "Dissolve",
+  "slide-left": "Slide from left",
+  "slide-right": "Slide from right",
+  "slide-up": "Slide from top",
+  "slide-down": "Slide from bottom",
+  zoom: "Zoom in",
+};
+
+export interface Transition {
+  kind: TransitionKind;
+  seconds: number;
+}
+
+export const DEFAULT_TRANSITION_SECONDS = 0.6;
+export const MIN_TRANSITION_SECONDS = 0.1;
+export const MAX_TRANSITION_SECONDS = 3;
+
+/** How small a zoom transition starts. Small enough to read as arriving,
+ * large enough that the picture is never unrecognisable on the way. */
+const ZOOM_TRANSITION_FROM = 0.55;
+
+/** A transition, trimmed to something the clip can actually hold.
+ *
+ * Half the clip at most: a transition longer than that would still be
+ * arriving when it had already begun to leave, and the two would fight
+ * over the same frames. */
+export function transitionSeconds(
+  transition: Transition | undefined,
+  clipSeconds: number,
+): number {
+  if (!transition) return 0;
+  return Math.max(
+    0,
+    Math.min(transition.seconds, MAX_TRANSITION_SECONDS, clipSeconds / 2),
+  );
+}
+
+/** Where a clip is, and how solid, partway through a transition.
+ *
+ * `progress` is 0 when the clip has not arrived at all and 1 when it is
+ * fully in place; an outgoing transition runs it the other way.
+ *
+ * Movement is eased and opacity is not, deliberately. The renderer fades
+ * alpha in a straight line and has no way to be asked for anything else,
+ * so easing the opacity here would make the preview a promise the
+ * finished file could not keep. Movement is sampled rather than described,
+ * so it can be eased freely.
+ */
+function transitionShape(
+  kind: TransitionKind,
+  progress: number,
+): { dx: number; dy: number; scale: number; opacity: number } {
+  const eased = smoothstep(Math.max(0, Math.min(1, progress)));
+  const away = 1 - eased;
+  switch (kind) {
+    case "dissolve":
+      return { dx: 0, dy: 0, scale: 1, opacity: progress };
+    case "slide-left":
+      return { dx: -away, dy: 0, scale: 1, opacity: 1 };
+    case "slide-right":
+      return { dx: away, dy: 0, scale: 1, opacity: 1 };
+    case "slide-up":
+      return { dx: 0, dy: -away, scale: 1, opacity: 1 };
+    case "slide-down":
+      return { dx: 0, dy: away, scale: 1, opacity: 1 };
+    case "zoom":
+      return {
+        dx: 0,
+        dy: 0,
+        scale: ZOOM_TRANSITION_FROM + (1 - ZOOM_TRANSITION_FROM) * eased,
+        opacity: progress,
+      };
+  }
+}
+
+/** Whether a transition moves the picture about, as against only fading
+ * it. The ones that move have to be sampled for the renderer; the ones
+ * that only fade are a filter it already has. */
+export function transitionMoves(kind: TransitionKind): boolean {
+  return kind !== "dissolve";
+}
+
+export function transitionFades(kind: TransitionKind): boolean {
+  return kind === "dissolve" || kind === "zoom";
+}
+
+/** Everything about how a clip is drawn at a moment in its own time: the
+ * framing its zoom asks for, moved and faded by whichever transitions are
+ * running. Past the end of the clip it keeps whatever it last had, which
+ * is what an outgoing clip does while the next one fades in over it. */
+export interface Framing {
+  layout: ClipLayout;
+  /** 0 is invisible, 1 fully there. */
+  opacity: number;
+}
+
+/** Only what the transitions are doing at this moment, with the clip's own
+ * framing left out of it. */
+function transitionDeltaAt(clip: TimelineClip, seconds: number) {
+  let dx = 0;
+  let dy = 0;
+  let scale = 1;
+  let opacity = 1;
+
+  const arriving = transitionSeconds(clip.transitionIn, clip.durationSeconds);
+  if (arriving > 0 && seconds < arriving && clip.transitionIn) {
+    const shape = transitionShape(clip.transitionIn.kind, seconds / arriving);
+    dx += shape.dx;
+    dy += shape.dy;
+    scale *= shape.scale;
+    opacity *= shape.opacity;
+  }
+
+  const leaving = transitionSeconds(clip.transitionOut, clip.durationSeconds);
+  if (leaving > 0 && seconds > clip.durationSeconds - leaving && clip.transitionOut) {
+    const left = (clip.durationSeconds - seconds) / leaving;
+    const shape = transitionShape(clip.transitionOut.kind, left);
+    dx += shape.dx;
+    dy += shape.dy;
+    scale *= shape.scale;
+    opacity *= shape.opacity;
+  }
+
+  return { dx, dy, scale, opacity: Math.max(0, Math.min(1, opacity)) };
+}
+
+export function framingAt(clip: TimelineClip, seconds: number): Framing {
+  const resting = layoutAt(clip, seconds);
+  const move = transitionDeltaAt(clip, seconds);
+  return {
+    layout: {
+      x: resting.x + move.dx,
+      y: resting.y + move.dy,
+      scale: resting.scale * move.scale,
+    },
+    opacity: move.opacity,
+  };
+}
+
+/** The framing for a title.
+ *
+ * A title's own layout says where the words sit inside the frame, not
+ * where the frame sits — the drawing covers the whole stage either way,
+ * which is what lets the preview and the export be the same picture. So a
+ * transition moves the drawing and leaves the words where they were
+ * placed within it.
+ */
+export function transitionFramingAt(clip: TimelineClip, seconds: number): Framing {
+  const move = transitionDeltaAt(clip, seconds);
+  return {
+    layout: { x: move.dx, y: move.dy, scale: move.scale },
+    opacity: move.opacity,
+  };
+}
+
+/** The framing to draw a clip's layer at, whatever kind of clip it is. */
+export function layerFramingAt(clip: TimelineClip, seconds: number): Framing {
+  return isTextClip(clip)
+    ? transitionFramingAt(clip, seconds)
+    : framingAt(clip, seconds);
+}
+
+/** How long the clip before this one has to keep playing for this one to
+ * fade in over it rather than out of the backdrop.
+ *
+ * Zero unless the clip actually arrives with a transition — a plain cut
+ * needs nothing held.
+ */
+export function holdForTransition(clip: TimelineClip | undefined): number {
+  if (!clip) return 0;
+  return transitionSeconds(clip.transitionIn, clip.durationSeconds);
+}
+
+/** The clip immediately before this one on the same track, when the two
+ * meet with no gap between them.
+ *
+ * A gap means there is nothing to transition from: the clip arrives out of
+ * the backdrop, and holding the earlier clip over the gap would put back
+ * on screen something the edit had already left behind.
+ */
+export function clipBefore(
+  clips: TimelineClip[],
+  clip: TimelineClip,
+): TimelineClip | undefined {
+  return clips.find(
+    (other) =>
+      other.id !== clip.id &&
+      Math.abs(other.startSeconds + other.durationSeconds - clip.startSeconds) < 0.002,
+  );
 }
 
 /** One framing, held at a moment in a clip. Between two of them the
@@ -392,6 +661,9 @@ export interface TimelineTrack {
   /** Row height in pixels, when it has been dragged taller than the rest.
    * Absent means the default. */
   height?: number;
+  /** Whether the name was chosen by hand. Numbered names are handed out
+   * automatically; one that was typed is left alone. */
+  named?: boolean;
 }
 
 /** Row heights. The default is deliberately short so several tracks fit;
@@ -577,6 +849,149 @@ export function sliceVolume(
   ];
 }
 
+/* ------------------------------------------------------------------ speed */
+
+/** How far a clip's speed may be pushed. Four times is about as fast as a
+ * screen recording stays followable; a quarter is slow enough to study a
+ * single frame without the picture turning to mush. */
+export const MIN_SPEED = 0.25;
+export const MAX_SPEED = 4;
+
+/** The ones worth a button of their own. */
+export const SPEED_PRESETS = [0.25, 0.5, 1, 1.5, 2, 4];
+
+export function speedOf(clip: TimelineClip): number {
+  const speed = clip.speed;
+  if (typeof speed !== "number" || !Number.isFinite(speed) || speed <= 0) return 1;
+  return Math.min(MAX_SPEED, Math.max(MIN_SPEED, speed));
+}
+
+/** How much of the file a stretch of timeline uses up. */
+export function mediaSpan(clip: TimelineClip, timelineSeconds: number): number {
+  return timelineSeconds * speedOf(clip);
+}
+
+/** The moment in the file that plays at a moment in the clip. */
+export function mediaTimeAt(clip: TimelineClip, elapsed: number): number {
+  return (clip.trimStartSeconds ?? 0) + elapsed * speedOf(clip);
+}
+
+/** How it is said on screen: 1x, 1.5x, 0.25x. */
+export function formatSpeed(speed: number): string {
+  return `${Number(speed.toFixed(2))}x`;
+}
+
+/** The same clip played at a different speed.
+ *
+ * The stretch of the file it shows is kept and its length on the timeline
+ * changes, which is the way round that makes the feature worth having:
+ * speeding up a dull minute is meant to make it take less time, not to
+ * show less of it.
+ *
+ * The volume line and the zoom are timed against the clip rather than
+ * against the file, so they are stretched with it and stay over the same
+ * material.
+ */
+export function withSpeed(clip: TimelineClip, speed: number): TimelineClip {
+  const next = Math.min(MAX_SPEED, Math.max(MIN_SPEED, speed));
+  const material = mediaSpan(clip, clip.durationSeconds);
+  const duration = toMillis(Math.max(MIN_CLIP_SECONDS, material / next));
+  const stretch = clip.durationSeconds > 0 ? duration / clip.durationSeconds : 1;
+
+  return {
+    ...clip,
+    speed: next === 1 ? undefined : next,
+    durationSeconds: duration,
+    volume: clip.volume?.map((point) => ({
+      at: toMillis(point.at * stretch),
+      gain: point.gain,
+    })),
+    layoutPoints: clip.layoutPoints?.map((point) => ({
+      at: toMillis(point.at * stretch),
+      layout: point.layout,
+    })),
+  };
+}
+
+/** The clips that were split off this one, or that it was split off from:
+ * a video and the sound lifted away from it, which have to be kept the
+ * same length as each other. */
+function partnersOf(tracks: TimelineTrack[], clip: TimelineClip): Set<string> {
+  const partners = new Set<string>();
+  for (const track of tracks) {
+    for (const other of track.clips) {
+      if (other.id === clip.id) continue;
+      if (other.sourceClipId === clip.id || clip.sourceClipId === other.id) {
+        partners.add(other.id);
+        continue;
+      }
+      // Projects made before the two were linked by name: the sound that
+      // was lifted off a clip sits at the same moment, for the same
+      // length, pointing at the same file.
+      if (
+        other.sourceClipId == null &&
+        clip.sourceClipId == null &&
+        Boolean(other.soundOnly) !== Boolean(clip.soundOnly) &&
+        other.mediaPath === clip.mediaPath &&
+        Math.abs(other.startSeconds - clip.startSeconds) < 0.002 &&
+        Math.abs(other.durationSeconds - clip.durationSeconds) < 0.002 &&
+        speedOf(other) === speedOf(clip)
+      ) {
+        partners.add(other.id);
+      }
+    }
+  }
+  return partners;
+}
+
+/** Sets a clip's speed and closes up after it.
+ *
+ * A clip that plays faster is shorter, so what comes after it on the same
+ * track is moved along by the difference — otherwise speeding up a dull
+ * stretch would leave a hole exactly as long as the time it saved, which
+ * is the opposite of the point.
+ *
+ * Only the tracks that are actually affected move: the clip's own, and
+ * that of the sound split off it. A music bed on another track was laid
+ * against the whole film and is left where it was put.
+ */
+export function setClipSpeed(
+  tracks: TimelineTrack[],
+  clipId: string,
+  speed: number,
+): TimelineTrack[] {
+  let found: TimelineClip | undefined;
+  for (const track of tracks) {
+    const match = track.clips.find((clip) => clip.id === clipId);
+    if (match) found = match;
+  }
+  if (!found) return tracks;
+
+  const wanted = Math.min(MAX_SPEED, Math.max(MIN_SPEED, speed));
+  if (speedOf(found) === wanted) return tracks;
+
+  const changing = new Set<string>([clipId, ...partnersOf(tracks, found)]);
+  const oldEnd = found.startSeconds + found.durationSeconds;
+  const delta = withSpeed(found, wanted).durationSeconds - found.durationSeconds;
+
+  return tracks.map((track) => {
+    if (!track.clips.some((clip) => changing.has(clip.id))) return track;
+    const clips = track.clips
+      .map((clip) => {
+        if (changing.has(clip.id)) return withSpeed(clip, wanted);
+        // Everything that began at or after the old end shifts by the
+        // difference. A clip that straddles that moment is left alone:
+        // moving it would break its own place against the picture.
+        if (clip.startSeconds >= oldEnd - 0.001) {
+          return { ...clip, startSeconds: toMillis(clip.startSeconds + delta) };
+        }
+        return clip;
+      })
+      .sort((a, b) => a.startSeconds - b.startSeconds);
+    return { ...track, clips };
+  });
+}
+
 /** The shortest a clip may be trimmed to. Long enough to still be grabbed
  * and dragged back out again. */
 export const MIN_CLIP_SECONDS = 0.1;
@@ -599,19 +1014,21 @@ export function trimClip(
   mediaSeconds: number | null | undefined,
 ): TimelineClip {
   const trimStart = clip.trimStartSeconds ?? 0;
+  const speed = speedOf(clip);
   const end = clip.startSeconds + clip.durationSeconds;
 
   if (edge === "start") {
     // Back no further than the file's own beginning, and no later than a
-    // hair before the tail.
-    const earliest = Math.max(0, clip.startSeconds - trimStart);
+    // hair before the tail. The head of the file is `trimStart` seconds of
+    // material away, which at this speed is that much less time.
+    const earliest = Math.max(0, clip.startSeconds - trimStart / speed);
     const latest = end - MIN_CLIP_SECONDS;
     const at = toMillis(Math.min(Math.max(seconds, earliest), latest));
     const moved = at - clip.startSeconds;
     return {
       ...clip,
       startSeconds: at,
-      trimStartSeconds: toMillis(trimStart + moved),
+      trimStartSeconds: toMillis(trimStart + moved * speed),
       durationSeconds: toMillis(clip.durationSeconds - moved),
       volume: sliceVolume(clip.volume, moved, clip.durationSeconds),
       layoutPoints: sliceLayout(
@@ -627,7 +1044,7 @@ export function trimClip(
   // material; a still has none to run out of.
   const available =
     typeof mediaSeconds === "number" && mediaSeconds > 0
-      ? mediaSeconds - trimStart
+      ? (mediaSeconds - trimStart) / speed
       : Number.POSITIVE_INFINITY;
   const longest = clip.startSeconds + available;
   const at = toMillis(
@@ -797,6 +1214,10 @@ export function withTrackNames(tracks: TimelineTrack[]): TimelineTrack[] {
       if (paired == null) loose += 1;
       name = `Audio ${paired ?? loose}`;
     }
+    // A name the user typed is theirs. Numbering the tracks is a
+    // convenience for the ones nobody has bothered to name, and quietly
+    // renaming "Interview" back to "Track 2" would not be one.
+    if (track.named) return track;
     return track.name === name ? track : { ...track, name };
   });
 }
@@ -804,6 +1225,106 @@ export function withTrackNames(tracks: TimelineTrack[]): TimelineTrack[] {
 /** How long a clip runs when its media hasn't reported a duration — a
  * still image has none at all, and a video that's still being probed
  * doesn't have one yet. */
+/** A clip on the clipboard, held with its place measured from the
+ * earliest of the group rather than from the start of the timeline. */
+export interface CopiedClip {
+  clip: TimelineClip;
+  /** Seconds after the earliest piece in the group. */
+  startOffset: number;
+  /** Tracks below the one the earliest piece came from. */
+  trackOffset: number;
+}
+
+/** Takes copies of clips, keeping the arrangement they were in.
+ *
+ * Measured from the earliest of them, and from the track that one was on,
+ * so the group can be put down somewhere else and still be the same
+ * shape. Without this a group pasted anywhere would land in a heap at one
+ * moment on one track.
+ *
+ * The result is in time order, which is the order they play and so the
+ * order it is safe to lay them down in.
+ */
+export function copyOf(
+  tracks: TimelineTrack[],
+  clipIds: string[],
+): CopiedClip[] {
+  const wanted = new Set(clipIds);
+  const found: { clip: TimelineClip; track: number }[] = [];
+  tracks.forEach((track, index) => {
+    for (const clip of track.clips) {
+      if (wanted.has(clip.id)) found.push({ clip, track: index });
+    }
+  });
+  if (found.length === 0) return [];
+
+  found.sort((a, b) =>
+    a.clip.startSeconds === b.clip.startSeconds
+      ? a.track - b.track
+      : a.clip.startSeconds - b.clip.startSeconds,
+  );
+  const first = found[0];
+  return found.map((entry) => ({
+    clip: entry.clip,
+    startOffset: toMillis(entry.clip.startSeconds - first.clip.startSeconds),
+    trackOffset: entry.track - first.track,
+  }));
+}
+
+/** Where one clip is to end up. */
+export interface ClipMove {
+  clipId: string;
+  trackId: string;
+  startSeconds: number;
+}
+
+/** Where a whole selection ends up when one of its clips is dragged.
+ *
+ * The clip under the pointer goes exactly where it was dropped; the rest
+ * keep their places relative to it, shifting by the same amount of time
+ * and the same number of tracks. A clip that would fall off the top or the
+ * bottom of the track list is held at the end one rather than lost.
+ *
+ * Nothing is moved before the start of the timeline: the whole group is
+ * held back together if the earliest of them would have gone negative, so
+ * the arrangement survives being dragged too far left.
+ */
+export function moveSelection(
+  tracks: TimelineTrack[],
+  clipIds: string[],
+  draggedId: string,
+  toTrackId: string,
+  toSeconds: number,
+): ClipMove[] {
+  const place = new Map<string, { clip: TimelineClip; track: number }>();
+  tracks.forEach((track, index) => {
+    for (const clip of track.clips) {
+      if (clipIds.includes(clip.id)) place.set(clip.id, { clip, track: index });
+    }
+  });
+
+  const dragged = place.get(draggedId);
+  const landing = tracks.findIndex((track) => track.id === toTrackId);
+  if (!dragged || landing < 0) {
+    return [{ clipId: draggedId, trackId: toTrackId, startSeconds: toSeconds }];
+  }
+
+  const shift = toSeconds - dragged.clip.startSeconds;
+  const earliest = Math.min(
+    ...[...place.values()].map((found) => found.clip.startSeconds),
+  );
+  // Held back as one rather than piling up against zero one clip at a time.
+  const held = Math.max(shift, -earliest);
+  const drop = landing - dragged.track;
+
+  return [...place.values()].map((found) => ({
+    clipId: found.clip.id,
+    trackId:
+      tracks[Math.max(0, Math.min(tracks.length - 1, found.track + drop))].id,
+    startSeconds: toMillis(found.clip.startSeconds + held),
+  }));
+}
+
 export const DEFAULT_CLIP_SECONDS = 5;
 
 let idCounter = 0;
@@ -841,6 +1362,34 @@ export interface ProjectFile {
 
 export const PROJECT_EXTENSION = "jd";
 
+/** Work in progress, kept between saves so that an editor which never got
+ * the chance to close properly can offer it back.
+ *
+ * It holds the project exactly as a `.jd` file would, plus where that file
+ * was — the project may never have been saved at all, in which case there
+ * is no path and the recovered work is simply untitled again. */
+export interface RecoveryFile {
+  format: "jdeditor-recovery";
+  version: 1;
+  /** When it was written, from the clock of the machine that wrote it. */
+  savedAtMs: number;
+  /** The `.jd` it belongs to, or null for a project never saved. */
+  projectPath: string | null;
+  project: ProjectFile;
+}
+
+/** How long ago, said the way a person would. */
+export function timeAgo(msSince: number): string {
+  const seconds = Math.max(0, Math.round(msSince / 1000));
+  if (seconds < 90) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} minutes ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return hours === 1 ? "an hour ago" : `${hours} hours ago`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? "yesterday" : `${days} days ago`;
+}
+
 /* --------------------------------------------------------- media paths */
 
 /** Paths are compared and joined with forward slashes throughout. Windows
@@ -850,10 +1399,11 @@ function normalisePath(path: string): string {
   return path.split(String.fromCharCode(92)).join("/");
 }
 
-/** The folder a project file lives in. */
-export function projectFolder(projectPath: string): string {
-  const at = normalisePath(projectPath).lastIndexOf("/");
-  return at < 0 ? "" : normalisePath(projectPath).slice(0, at);
+/** The folder a file lives in, whichever separator it was written with. */
+export function folderOf(filePath: string): string {
+  const path = normalisePath(filePath);
+  const at = path.lastIndexOf("/");
+  return at < 0 ? "" : path.slice(0, at);
 }
 
 /** Where a media file sits relative to its project, when it sits beneath
@@ -872,7 +1422,7 @@ export function toRelativeMediaPath(
   projectPath: string | null,
 ): string | undefined {
   if (!projectPath) return undefined;
-  const folder = projectFolder(projectPath);
+  const folder = folderOf(projectPath);
   if (!folder) return undefined;
   const media = normalisePath(mediaPath);
   const prefix = `${folder}/`;
@@ -888,7 +1438,7 @@ export function fromRelativeMediaPath(
   relative: string,
   projectPath: string,
 ): string {
-  const folder = projectFolder(projectPath);
+  const folder = folderOf(projectPath);
   return folder ? `${folder}/${normalisePath(relative)}` : normalisePath(relative);
 }
 
@@ -964,6 +1514,26 @@ export interface ExportPlanClip {
   visual: boolean;
   audible: boolean;
   still: boolean;
+  /** Whether the project's corner radius applies to it. Footage gets it;
+   * a title, which is words on a transparent sheet, does not. */
+  rounded: boolean;
+  /** How long the clip fades up at its start and away at its end, in its
+   * own seconds. Zero for a transition that only moves, and for a plain
+   * cut. */
+  fadeIn: number;
+  fadeOut: number;
+  /** Extra seconds of the clip's own material to keep playing after its
+   * end, so the clip that follows can arrive over the top of it rather
+   * than out of the backdrop. */
+  hold: number;
+  /** The part of that hold there is no material left for, which is held on
+   * the last frame instead. */
+  freeze: number;
+  /** How fast it plays. Every other number here is in timeline seconds;
+   * this is what turns them into seconds of the file. */
+  speed: number;
+  /** Width as a fraction of the stage, and the centre of the layer as a
+   * fraction of the stage measured from the stage's own centre. */
   scale: number;
   x: number;
   y: number;
@@ -976,8 +1546,16 @@ export interface ExportPlanClip {
 export interface ExportPlan {
   outputPath: string;
   format: ExportFormat;
+  /** The whole picture, backdrop included. */
   width: number;
   height: number;
+  /** Where the footage goes inside that picture: the frame inset by the
+   * padding. Clip placements are fractions of this, not of the frame. */
+  stage: { x: number; y: number; width: number; height: number };
+  /** Corner radius for footage, in the frame's own pixels. */
+  radius: number;
+  /** The backdrop the editor drew, on disk, or null for a bare frame. */
+  backdrop: string | null;
   fps: number;
   duration: number;
   videoQuality: number;
