@@ -10,7 +10,16 @@ use tauri::{Emitter, Manager};
 /// is stacked over, where its volume line reads at each moment — and sends
 /// the result. Nothing here knows about tracks, layers or decibels; this
 /// end only knows how to turn a list of placements into an ffmpeg command.
+/// Named the way the editor names them.
+///
+/// `rename_all` because the plan is composed in the editor, where these
+/// are `trimStart` and `fadeIn`; without it serde looks for `trim_start`
+/// and never finds it. `deny_unknown_fields` because of what happens when
+/// it does not find one: a field with a default is quietly left at zero,
+/// so a misspelled `fadeIn` would export every transition with no fade at
+/// all and say nothing. Refusing the whole plan is the lesser failure.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlanClip {
     pub path: String,
     /// Where it begins on the timeline, in seconds.
@@ -64,6 +73,7 @@ pub struct PlanClip {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanZoomPoint {
     pub at: f64,
     pub scale: f64,
@@ -73,6 +83,7 @@ pub struct PlanZoomPoint {
 
 /// A rectangle inside the frame, in the frame's own pixels.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanRect {
     pub x: f64,
     pub y: f64,
@@ -81,13 +92,14 @@ pub struct PlanRect {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanVolumePoint {
     pub at: f64,
     pub gain: f64,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExportPlan {
     pub output_path: String,
     pub format: String,
@@ -2021,6 +2033,116 @@ args: {}",
         assert!(
             looks_like(pixel_at(&p.output_path, 2.0, 238, 750), GREEN),
             "and below it too"
+        );
+    }
+
+    /// A plan as the editor actually sends it, read the way the command
+    /// actually reads it.
+    ///
+    /// Every other test here builds a `PlanClip` in Rust and never goes
+    /// near the wire — which is why all of them passed while exporting was
+    /// impossible: the editor sends `trimStart` and this end was looking
+    /// for `trim_start`. The names only exist in two places, and nothing
+    /// until now compared them.
+    ///
+    /// The text below is copied from what `buildExportPlan` produced, not
+    /// written from memory of what it ought to produce.
+    const SENT_BY_THE_EDITOR: &str = r#"{
+      "outputPath": "C:/out/film.mp4",
+      "format": "mp4",
+      "width": 1920,
+      "height": 1080,
+      "stage": { "x": 96, "y": 54, "width": 1728, "height": 972 },
+      "radius": 21,
+      "backdrop": "C:/cache/backdrop.png",
+      "fps": 30,
+      "duration": 10,
+      "videoQuality": 23,
+      "audioBitrateKbps": 192,
+      "clips": [
+        {
+          "path": "C:/take.mp4",
+          "start": 0,
+          "duration": 5,
+          "trimStart": 2.5,
+          "visual": true,
+          "audible": true,
+          "still": false,
+          "rounded": true,
+          "fadeIn": 0,
+          "fadeOut": 0,
+          "hold": 1,
+          "freeze": 0,
+          "speed": 2,
+          "scale": 1,
+          "x": 0,
+          "y": 0,
+          "volume": [{ "at": 0, "gain": 1 }, { "at": 5, "gain": 0 }],
+          "zoom": []
+        },
+        {
+          "path": "C:/take.mp4",
+          "start": 5,
+          "duration": 5,
+          "trimStart": 0,
+          "visual": true,
+          "audible": true,
+          "still": false,
+          "rounded": true,
+          "fadeIn": 1,
+          "fadeOut": 0.5,
+          "hold": 0,
+          "freeze": 0,
+          "speed": 1,
+          "scale": 1,
+          "x": 0,
+          "y": 0,
+          "volume": [],
+          "zoom": [{ "at": 0, "scale": 1, "x": 0, "y": 0 }, { "at": 5, "scale": 1, "x": -1, "y": 0 }]
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn the_plan_the_editor_sends_is_the_plan_this_end_reads() {
+        let plan: ExportPlan =
+            serde_json::from_str(SENT_BY_THE_EDITOR).expect("the editor's own plan");
+
+        assert_eq!(plan.output_path, "C:/out/film.mp4");
+        assert_eq!(plan.video_quality, 23);
+        assert_eq!(plan.audio_bitrate_kbps, 192);
+        assert_eq!(plan.stage.width, 1728.0);
+        assert_eq!(plan.backdrop.as_deref(), Some("C:/cache/backdrop.png"));
+
+        // The three that differ between the two ends. A default would have
+        // left each of these at zero without a word.
+        assert_eq!(plan.clips[0].trim_start, 2.5, "trimStart");
+        assert_eq!(plan.clips[1].fade_in, 1.0, "fadeIn");
+        assert_eq!(plan.clips[1].fade_out, 0.5, "fadeOut");
+
+        assert_eq!(plan.clips[0].speed, 2.0);
+        assert_eq!(plan.clips[0].hold, 1.0);
+        assert_eq!(plan.clips[0].volume.len(), 2);
+        assert_eq!(plan.clips[1].zoom.len(), 2);
+
+        // And it builds a command, rather than merely parsing.
+        let args = build_args(&plan).expect("args");
+        let graph = args.join(" ");
+        assert!(graph.contains("trim=start=2.5000"), "{graph}");
+        assert!(graph.contains("fade=t=in:st=0:d=1.0000:alpha=1"), "{graph}");
+    }
+
+    #[test]
+    fn a_field_this_end_does_not_know_is_refused_rather_than_ignored() {
+        // The failure this guards against is the quiet one: a name that
+        // does not match leaves the field at its default and the render
+        // comes out wrong with nothing said. Refusing the plan turns that
+        // into a message.
+        let misspelled = SENT_BY_THE_EDITOR.replace("\"fadeIn\"", "\"fade_in\"");
+        let refused: Result<ExportPlan, _> = serde_json::from_str(&misspelled);
+        assert!(
+            refused.is_err(),
+            "a field this end does not know should be refused, not ignored"
         );
     }
 }
