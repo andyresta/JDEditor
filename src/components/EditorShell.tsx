@@ -20,7 +20,7 @@ import {
   PALETTES,
   paletteOf,
 } from "../frame";
-import { drawTextLayer } from "../textLayer";
+import { drawTextLayer, textBounds } from "../textLayer";
 import { MenuBar, type MenuDef } from "./MenuBar";
 import {
   BACKDROP_CATEGORIES,
@@ -34,6 +34,7 @@ import {
   formatSpeed,
   FRAME_SHAPES,
   FRAME_SHAPE_LABELS,
+  shapeRatio,
   MAX_SPEED,
   mediaSpan,
   mediaTimeAt,
@@ -172,6 +173,39 @@ function positionAtY(percent: number): number {
  * timeline is zoomed in. */
 const SNAP_PIXELS = 6;
 
+/** How long before a clip is due its picture is put on the stage, out of
+ * sight, so the file is open and a frame is ready when it is wanted.
+ *
+ * Measured rather than guessed: a freshly mounted video element reports
+ * nothing decoded, and took 64-206 ms to reach its first frame with the
+ * file already cached and served from this machine. A recording read off
+ * disk is slower, so the lead is generous — it costs one paused element. */
+const WARM_SECONDS = 1.5;
+
+/** How close a layer's edge has to come to the frame's before it is taken
+ * there exactly. In pixels rather than in fractions of the frame, so the
+ * pull feels the same whatever size the window leaves the preview. */
+const STAGE_SNAP_PIXELS = 14;
+
+/** Takes a number to the nearest mark within reach, or leaves it exactly
+ * as it was.
+ *
+ * Returning the value untouched when nothing is near matters: a layer
+ * should only ever be moved by the magnet, never quietly rounded off by
+ * it. */
+function magnet(value: number, marks: number[], reach: number): number {
+  let best = value;
+  let nearest = reach;
+  for (const mark of marks) {
+    const away = Math.abs(value - mark);
+    if (away < nearest) {
+      nearest = away;
+      best = mark;
+    }
+  }
+  return best;
+}
+
 /** Below this width a clip is all handle and nothing else, so the handles
  * step aside and leave it draggable. */
 const TRIM_HANDLE_PX = 7;
@@ -197,6 +231,41 @@ function volumeCurve(points: VolumePoint[], durationSeconds: number): string {
   return path.join(" ");
 }
 
+/** A map of where a layer will sit: the frame, and the part of it the
+ * picture is about to cover. Drawn rather than named because "top left,
+ * quarter" is a picture, and reading it as a picture is quicker. */
+function PlaceMark({
+  wide,
+  high,
+  across,
+  down,
+}: {
+  wide: number;
+  high: number;
+  across: "left" | "centre" | "right";
+  down: "top" | "middle" | "bottom";
+}) {
+  const w = 13 * wide;
+  const h = 9 * high;
+  const x = across === "left" ? 1 : across === "right" ? 14 - w : 1 + (13 - w) / 2;
+  const y = down === "top" ? 1 : down === "bottom" ? 10 - h : 1 + (9 - h) / 2;
+  return (
+    <svg className="ed-icon" viewBox="0 0 15 11" aria-hidden="true">
+      <rect
+        x="0.5"
+        y="0.5"
+        width="14"
+        height="10"
+        rx="1.5"
+        fill="none"
+        stroke="currentColor"
+        strokeOpacity="0.4"
+      />
+      <rect x={x} y={y} width={w} height={h} rx="1" fill="currentColor" />
+    </svg>
+  );
+}
+
 /** A clip covering the playhead, ready to be drawn: what it plays, how
  * high it sits in the stack, and where in the frame it goes. */
 interface Layer {
@@ -214,6 +283,12 @@ interface Layer {
    * Its picture carries on; its sound does not, because a transition is
    * something that happens to the picture. */
   holding: boolean;
+  /** Not on screen at all yet: mounted early, invisible and silent, so the
+   * file is open and a frame decoded before the clip is due. Without this
+   * a clip's picture begins as an empty video element, which is a black
+   * box — and a transition then fades that black in over the picture it
+   * was supposed to be dissolving into. */
+  warming: boolean;
   /** Whether it can be moved about the frame. The stand-in layer shown for
    * a sidebar selection isn't part of the edit, so it can't be. */
   movable: boolean;
@@ -823,6 +898,24 @@ export function EditorShell({
    * the stutter that taking the playhead off React fixed. */
   const layerBoxes = useRef(new Map<string, HTMLElement>());
   const layerBoxRefs = useRef(new Map<string, (el: HTMLElement | null) => void>());
+  /** The ring and corners drawn around the selected layer, kept in step
+   * with its box while a zoom or a transition moves it. */
+  const layerMarks = useRef(new Map<string, HTMLElement>());
+  const layerMarksRefs = useRef(new Map<string, (el: HTMLElement | null) => void>());
+  const layerMarksRef = useCallback((clipId: string) => {
+    const cached = layerMarksRefs.current.get(clipId);
+    if (cached) return cached;
+    const keep = (element: HTMLElement | null) => {
+      if (element) layerMarks.current.set(clipId, element);
+      else {
+        layerMarks.current.delete(clipId);
+        layerMarksRefs.current.delete(clipId);
+      }
+    };
+    layerMarksRefs.current.set(clipId, keep);
+    return keep;
+  }, []);
+
   const layerBoxRef = useCallback((clipId: string) => {
     const cached = layerBoxRefs.current.get(clipId);
     if (cached) return cached;
@@ -925,6 +1018,15 @@ export function EditorShell({
   const [trimmingClipId, setTrimmingClipId] = useState<string | null>(null);
   /** The clip menu raised by a right-click, and where to put it. */
   const [clipMenu, setClipMenu] = useState<{
+    clipId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  /** The menu raised by right-clicking a picture in the preview. Kept
+   * apart from the timeline's clip menu: what can be done to a layer in
+   * the frame — where it sits, how much of the frame it covers — is not
+   * what can be done to a clip on a track. */
+  const [layerMenu, setLayerMenu] = useState<{
     clipId: string;
     x: number;
     y: number;
@@ -1166,6 +1268,39 @@ export function EditorShell({
           currentTime >= c.startSeconds &&
           currentTime < c.startSeconds + c.durationSeconds,
       );
+
+      // The clip due next, put on the stage before its time: invisible,
+      // silent and paused, purely so that its file is open and a frame is
+      // decoded by the moment it is wanted. A video element that has just
+      // been created has nothing decoded and paints black, and a clip that
+      // arrives with a transition would otherwise cross-fade that black
+      // over the picture it was supposed to be dissolving into.
+      //
+      // Only one per track, and only when it is not already playing.
+      const soon = track.clips.find(
+        (c) =>
+          c.id !== clip?.id &&
+          c.startSeconds > currentTime &&
+          c.startSeconds - currentTime <= WARM_SECONDS &&
+          !isTextClip(c),
+      );
+      if (soon) {
+        const item = mediaByPath.get(soon.mediaPath);
+        if (item && item.kind === "video" && !soon.soundOnly) {
+          layers.push({
+            clip: soon,
+            item,
+            depth,
+            layout: layerFramingAt(soon, 0).layout,
+            opacity: 0,
+            holding: false,
+            warming: true,
+            movable: false,
+            audioOnly: false,
+          });
+        }
+      }
+
       if (!clip) continue;
 
       // A clip that arrives with a transition fades in over the one it
@@ -1179,6 +1314,7 @@ export function EditorShell({
         arriving > 0 && currentTime < clip.startSeconds + arriving
           ? clipBefore(track.clips, clip)
           : undefined;
+
 
       // A title has no file behind it, so it stands in as a still: silent,
       // with a picture, and with nothing to read a waveform from. Only the
@@ -1207,6 +1343,7 @@ export function EditorShell({
             textLayout: layoutAt(held, currentTime - held.startSeconds),
             opacity: framing.opacity,
             holding: true,
+            warming: false,
             movable: false,
             audioOnly: false,
           });
@@ -1224,6 +1361,7 @@ export function EditorShell({
         // heard is always fully there.
         opacity: audioOnly ? 1 : framing.opacity,
         holding: false,
+        warming: false,
         movable: !audioOnly,
         audioOnly,
       });
@@ -1251,6 +1389,7 @@ export function EditorShell({
         layout: FULL_FRAME_LAYOUT,
         opacity: 1,
         holding: false,
+        warming: false,
         movable: false,
         audioOnly: selectedMedia.kind === "audio",
       },
@@ -1260,6 +1399,10 @@ export function EditorShell({
   /** Audio plays but has nothing to draw, so it is kept out of the stack
    * and mounted on its own. */
   const visualLayers = previewLayers.filter((layer) => !layer.audioOnly);
+  /** What is actually on screen. A layer warming up is mounted but not
+   * shown, so it must not answer the question "is anything playing here" —
+   * a gap with the next clip warming in it is still a gap. */
+  const shownLayers = visualLayers.filter((layer) => !layer.warming);
   const audioLayers = previewLayers.filter((layer) => layer.audioOnly);
 
   /** A bare audio file selected in the sidebar still gets the old card,
@@ -1333,6 +1476,7 @@ export function EditorShell({
       // `element.muted`, because a boosted element no longer plays through
       // its own volume at all.
       const silent =
+        layer.warming ||
         layer.holding ||
         Boolean(layer.clip.muted) ||
         (!layer.audioOnly && Boolean(layer.clip.audioDetached));
@@ -1404,7 +1548,9 @@ export function EditorShell({
     for (const layer of previewLayers) {
       const element = layerMedia.current.get(layer.clip.id);
       if (!element) continue;
-      if (!isPlaying) {
+      // A layer warming up is not playing yet; it is holding its first
+      // frame, which is the whole point of it being there.
+      if (!isPlaying || layer.warming) {
         element.pause();
         continue;
       }
@@ -1582,10 +1728,20 @@ export function EditorShell({
       const box = layerBoxes.current.get(clip.id);
       if (!box) continue;
       const framing = layerFramingAt(clip, at - clip.startSeconds);
-      box.style.width = `${framing.layout.scale * 100}%`;
+      const wide = boxScaleRef.current(clip, framing.layout.scale);
+      box.style.width = `${wide * 100}%`;
       box.style.left = `${(0.5 + framing.layout.x) * 100}%`;
       box.style.top = `${(0.5 + framing.layout.y) * 100}%`;
       box.style.opacity = `${framing.opacity}`;
+      const marks = layerMarks.current.get(clip.id);
+      // A title's ring is placed in pixels around the words themselves, so
+      // the box's own numbers are not what move it. Only a layer ringed by
+      // its own box is followed here.
+      if (marks && !isTextClip(clip)) {
+        marks.style.width = box.style.width;
+        marks.style.left = box.style.left;
+        marks.style.top = box.style.top;
+      }
     }
     if (!sceneRef.current.hasClips) return;
 
@@ -2325,6 +2481,9 @@ export function EditorShell({
   }
 
   const menuTarget = clipMenu ? (clipsById.get(clipMenu.clipId) ?? null) : null;
+  const layerMenuTarget = layerMenu
+    ? (visualLayers.find((layer) => layer.clip.id === layerMenu.clipId) ?? null)
+    : null;
   /** What the clip menu acts on: the whole selection when the clip it was
    * opened on is part of it, and that clip alone otherwise. */
   const menuSelection = clipMenu
@@ -2356,8 +2515,11 @@ export function EditorShell({
   // The menu closes on the next thing that happens anywhere, the way every
   // context menu does.
   useEffect(() => {
-    if (!clipMenu) return;
-    const close = () => setClipMenu(null);
+    if (!clipMenu && !layerMenu) return;
+    const close = () => {
+      setClipMenu(null);
+      setLayerMenu(null);
+    };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
     };
@@ -2372,7 +2534,7 @@ export function EditorShell({
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", close, true);
     };
-  }, [clipMenu]);
+  }, [clipMenu, layerMenu]);
 
   /** What a press on a clip does to the selection.
    *
@@ -2482,6 +2644,242 @@ export function EditorShell({
 
   /* ------------------------------------------------- layers on the stage */
 
+  /** The shape a layer is drawn at, which is its own picture's and not the
+   * frame's — a 4:3 clip half as wide as a 16:9 stage is nowhere near half
+   * as tall. A title is the exception: its drawing covers the whole frame,
+   * so it takes the frame's shape. */
+  function shapeOfLayer(layer: Layer): number {
+    if (isTextClip(layer.clip)) return shapeRatio(aspect);
+    return layer.item.width && layer.item.height
+      ? layer.item.width / layer.item.height
+      : 16 / 9;
+  }
+
+  /** The shape of the stage — the picture inside the padding. */
+  const stageShape =
+    geometry.stage.height > 0
+      ? geometry.stage.width / geometry.stage.height
+      : shapeRatio(aspect);
+
+  // A layout is measured in stage widths, with 0 at the stage's centre,
+  // because that is what the renderer is given. The frame is bigger than
+  // the stage by the padding, so everything below that talks about the
+  // frame has to be said in those same units first. `-insetX` is where the
+  // frame's left edge falls, and `frameWide` how many stage widths across
+  // it is. The two insets come out equal, since the stage keeps the
+  // frame's shape, but both are worked out rather than assumed.
+  const insetX = geometry.stage.width > 0 ? geometry.stage.x / geometry.stage.width : 0;
+  const insetY =
+    geometry.stage.height > 0 ? geometry.stage.y / geometry.stage.height : 0;
+  const frameWide = 1 + 2 * insetX;
+  const frameHigh = 1 + 2 * insetY;
+
+  /** How wide a layer's box is, as a fraction of the stage.
+   *
+   * Footage is placed against the stage — the padded inset the project's
+   * look describes. A title is not: its drawing is the whole picture, the
+   * padding included, because words written on a film are written on the
+   * film and not on the part of it left over after a margin. So a title's
+   * box is the frame, which in stage widths is `frameWide`.
+   *
+   * The renderer is told the same thing, in `buildExportPlan`, from the
+   * same two numbers — the frame's width and the stage's. */
+  function boxScale(clip: TimelineClip, scale: number): number {
+    return isTextClip(clip) ? scale * frameWide : scale;
+  }
+
+  /** Reached by the per-frame painter, which writes to the DOM directly
+   * and so cannot read a value that only exists during a render. */
+  const boxScaleRef = useRef(boxScale);
+  boxScaleRef.current = boxScale;
+
+  /** The ring and the four corners drawn around a selected layer: where
+   * the ring goes, and where each handle goes within it.
+   *
+   * Two things decide this. A title's ring goes round the words, not round
+   * its drawing: the drawing is the whole frame, because that is how it is
+   * laid over the picture, and a ring round the empty part of it says
+   * nothing about what is being held. And every mark is kept inside the
+   * frame, because the frame clips whatever reaches past it — as it must,
+   * the file being clipped there too — so a handle placed outside it is
+   * not merely unseen, it cannot be pressed at all. */
+  function marksFor(layer: Layer): {
+    box: CSSProperties;
+    handles: Record<string, CSSProperties>;
+  } {
+    // The frame, in the stage's own coordinates: the stage sits inside it,
+    // inset by the padding.
+    const frameLeft = -geometry.stage.x;
+    const frameTop = -geometry.stage.y;
+    const frameRight = frameLeft + geometry.width;
+    const frameBottom = frameTop + geometry.height;
+
+    /** A handle is 11px across; these keep it just inside the frame. */
+    const HANDLE = 11;
+    const KEEP = 2;
+
+    const words =
+      isTextClip(layer.clip) && layer.clip.text
+        ? textBounds(
+            layer.clip.text,
+            layer.textLayout ?? layer.layout,
+            geometry.width,
+            geometry.height,
+          )
+        : null;
+
+    if (words) {
+      // In the stage's coordinates, which is where the marks are drawn.
+      const left = words.x - geometry.stage.x;
+      const top = words.y - geometry.stage.y;
+      /** Centred on the box's own corners, unless that would take a handle
+       * past the frame, in which case it stops at the frame. */
+      const corners = (
+        near: number,
+        far: number,
+        span: number,
+        origin: number,
+      ): [number, number] => [
+        Math.max(-HANDLE / 2, near + KEEP - origin),
+        Math.min(span - HANDLE / 2, far - KEEP - HANDLE - origin),
+      ];
+      const [west, east] = corners(frameLeft, frameRight, words.width, left);
+      const [north, south] = corners(frameTop, frameBottom, words.height, top);
+      const place = (x: number, y: number): CSSProperties => ({
+        left: x + "px",
+        top: y + "px",
+        right: "auto",
+        bottom: "auto",
+      });
+      return {
+        box: {
+          left: left + "px",
+          top: top + "px",
+          width: words.width + "px",
+          height: words.height + "px",
+          // Placed by its corner rather than by its centre, unlike a
+          // layer's box, so the centring translation must not apply.
+          transform: "none",
+        },
+        handles: {
+          nw: place(west, north),
+          ne: place(east, north),
+          sw: place(west, south),
+          se: place(east, south),
+        },
+      };
+    }
+
+    // Footage: the ring goes round the layer itself, and each handle to
+    // the corner of however much of it the frame lets be seen.
+    const wide = boxScale(layer.clip, layer.layout.scale);
+    const shape = shapeOfLayer(layer);
+    const high = (wide * stageShape) / shape;
+    const left = 0.5 + layer.layout.x - wide / 2;
+    const top = 0.5 + layer.layout.y - high / 2;
+    const along = (edge: number) =>
+      Math.min(100, Math.max(0, ((edge - left) / (wide || 1)) * 100));
+    const down = (edge: number) =>
+      Math.min(100, Math.max(0, ((edge - top) / (high || 1)) * 100));
+    const at = (percent: number, far: boolean) =>
+      "calc(" + percent + "% " + (far ? "- " + (HANDLE + 3) + "px" : "+ 3px") + ")";
+    const place = (x: string, y: string): CSSProperties => ({
+      left: x,
+      top: y,
+      right: "auto",
+      bottom: "auto",
+    });
+    const west = at(along(-insetX), false);
+    const east = at(along(1 + insetX), true);
+    const north = at(down(-insetY), false);
+    const south = at(down(1 + insetY), true);
+    return {
+      box: {
+        width: wide * 100 + "%",
+        left: (0.5 + layer.layout.x) * 100 + "%",
+        top: (0.5 + layer.layout.y) * 100 + "%",
+        aspectRatio:
+          layer.item.width && layer.item.height
+            ? layer.item.width + " / " + layer.item.height
+            : "16 / 9",
+      },
+      handles: {
+        nw: place(west, north),
+        ne: place(east, north),
+        sw: place(west, south),
+        se: place(east, south),
+      },
+    };
+  }
+
+  /** Puts a layer into a part of the whole frame.
+   *
+   * `wide` and `high` are fractions of the frame — a quarter is 0.5 by
+   * 0.5 — and the corners named are the frame's corners, padding and all.
+   * That is the one thing these have to get right: "full" means the edge
+   * of the picture the file will hold, not the edge of the padded inset,
+   * and a layer told to fill the frame that stops at the padding does not
+   * look full to anyone.
+   *
+   * `cover` comes out at least as large as the box, cropping what will not
+   * fit; `contain` at most as large, leaving the backdrop showing where
+   * the shapes disagree. */
+  function placeInFrame(
+    layer: Layer,
+    wide: number,
+    high: number,
+    across: "left" | "centre" | "right",
+    down: "top" | "middle" | "bottom",
+    how: "cover" | "contain" = "contain",
+  ): ClipLayout {
+    const shape = shapeOfLayer(layer);
+    // The box, in stage widths and stage heights.
+    const boxWide = wide * frameWide;
+    const boxHigh = high * frameHigh;
+    // The width that fills the box across, and the width that fills it
+    // down. Contained takes the smaller, covering takes the larger.
+    const acrossFill = boxWide;
+    const downFill = (boxHigh * shape) / stageShape;
+    const scale =
+      how === "cover"
+        ? Math.max(acrossFill, downFill)
+        : Math.min(acrossFill, downFill);
+    const tall = (scale * stageShape) / shape;
+
+    // Where the box begins, measured from the stage's left edge in stage
+    // widths: the frame starts at -insetX, and the box sits inside it.
+    const boxLeft =
+      -insetX +
+      (across === "left" ? 0 : across === "right" ? 1 - wide : (1 - wide) / 2) *
+        frameWide;
+    const boxTop =
+      -insetY +
+      (down === "top" ? 0 : down === "bottom" ? 1 - high : (1 - high) / 2) * frameHigh;
+
+    const left =
+      across === "left"
+        ? boxLeft
+        : across === "right"
+          ? boxLeft + boxWide - scale
+          : boxLeft + (boxWide - scale) / 2;
+    const top =
+      down === "top"
+        ? boxTop
+        : down === "bottom"
+          ? boxTop + boxHigh - tall
+          : boxTop + (boxHigh - tall) / 2;
+
+    // Back into what a layout is: the centre, offset from the stage's.
+    return { scale, x: left + scale / 2 - 0.5, y: top + tall / 2 - 0.5 };
+  }
+
+  /** Puts a layout on a layer at the moment being looked at, which is what
+   * a zoom point is measured from. */
+  function setLayerLayout(layer: Layer, layout: ClipLayout) {
+    onUpdateClipLayout(layer.clip.id, layout, currentTime - layer.clip.startSeconds);
+    setLayerMenu(null);
+  }
+
   /** A layer being moved or resized, and the pointer reading it started
    * from. Kept in a ref: a drag repaints the stage on every move and none
    * of that bookkeeping should cause a render of its own. */
@@ -2510,7 +2908,12 @@ export function EditorShell({
     selectClip(layer.clip.id, event);
 
     const frame = stage.getBoundingClientRect();
-    const start = layer.layout;
+    // What the drag moves. For footage that is the layer's own framing;
+    // for a title it is where the words sit inside the drawing, because a
+    // title's `layout` carries only what a transition is doing to it and
+    // starting from that would throw the words back to the middle the
+    // moment they were touched a second time.
+    const start = (isTextClip(layer.clip) ? layer.textLayout : null) ?? layer.layout;
     const origin = { x: event.clientX, y: event.clientY };
     // Distance from the layer's centre at the moment the handle was
     // grabbed; resizing is that distance growing or shrinking.
@@ -2520,6 +2923,31 @@ export function EditorShell({
     };
     const reach = Math.hypot(origin.x - centre.x, origin.y - centre.y);
     let moved = false;
+
+    // The magnet works on edges, and where a layer's edges are depends on
+    // the shape of its own picture rather than the frame's.
+    const shape = shapeOfLayer(layer);
+
+    // What a layout's numbers are fractions of. Footage is placed against
+    // the stage; a title's numbers are read by the drawing, which covers
+    // the frame — so a hand that moves 150 pixels has to move the words
+    // 150 pixels, not 150 of something slightly smaller.
+    const words = isTextClip(layer.clip);
+    const acrossPx = words ? frame.width * frameWide : frame.width;
+    const downPx = words ? frame.height * frameHigh : frame.height;
+
+    /** A layer's height as a fraction of the stage, at a given width. */
+    const heightFor = (scale: number) => (scale * stageShape) / shape;
+    /** The sizes worth landing on exactly: filling the frame edge to edge,
+     * and sitting whole inside it — each of them both for the frame and
+     * for the padded inset, which are the same two numbers when there is
+     * no padding. */
+    const sizes = [
+      Math.max(1, shape / stageShape),
+      Math.min(1, shape / stageShape),
+      Math.max(frameWide, (frameHigh * shape) / stageShape),
+      Math.min(frameWide, (frameHigh * shape) / stageShape),
+    ];
 
     const onMove = (e: PointerEvent) => {
       if (
@@ -2532,24 +2960,69 @@ export function EditorShell({
       moved = true;
 
       const momentInClip = currentTime - layer.clip.startSeconds;
+      // Alt places a layer exactly where the hand puts it, for the times
+      // when a hair off the edge is the wanted picture.
+      const free = e.altKey;
+
       if (mode === "move") {
+        const wantedX = start.x + (e.clientX - origin.x) / acrossPx;
+        const wantedY = start.y + (e.clientY - origin.y) / downPx;
+        // Flush against a side of the frame, or centred on it. Each axis
+        // is pulled on its own, so a layer carried into a corner meets
+        // both at once and sits in it without a sliver of backdrop left
+        // showing along either side.
+        const halfWide = start.scale / 2;
+        const halfHigh = heightFor(start.scale) / 2;
+        // Flush against the frame's own edge, flush against the padded
+        // inset, or centred. Both edges are worth meeting: the inset is
+        // where a layer rests inside the project's padding, the frame is
+        // where the picture actually ends.
+        // A title has no edges of its own to bring anywhere — its drawing
+        // is the whole frame and the words float inside it — so the only
+        // mark worth meeting is the middle.
+        const acrossMarks = words
+          ? [0]
+          : [
+              halfWide - 0.5 - insetX,
+              halfWide - 0.5,
+              0,
+              0.5 - halfWide,
+              0.5 - halfWide + insetX,
+            ];
+        const downMarks = words
+          ? [0]
+          : [
+              halfHigh - 0.5 - insetY,
+              halfHigh - 0.5,
+              0,
+              0.5 - halfHigh,
+              0.5 - halfHigh + insetY,
+            ];
+        const x = free ? wantedX : magnet(wantedX, acrossMarks, STAGE_SNAP_PIXELS / acrossPx);
+        const y = free ? wantedY : magnet(wantedY, downMarks, STAGE_SNAP_PIXELS / downPx);
         onUpdateClipLayout(layer.clip.id, {
           ...start,
           // A layer may hang off the edge, but not so far that it can be
           // lost off-stage with no way to get it back.
           // Room to push a zoomed picture right off the frame's edge, so
           // the corner of a screen recording can be brought to the middle.
-          x: clamp(start.x + (e.clientX - origin.x) / frame.width, -2, 2),
-          y: clamp(start.y + (e.clientY - origin.y) / frame.height, -2, 2),
+          x: clamp(x, -2, 2),
+          y: clamp(y, -2, 2),
         }, momentInClip);
         return;
       }
 
       if (reach < 6) return;
       const now = Math.hypot(e.clientX - centre.x, e.clientY - centre.y);
+      const wanted = start.scale * (now / reach);
+      // The two sizes worth landing on exactly, so a layer meant to fill
+      // the frame fills it rather than missing by a pixel.
+      const scale = free
+        ? wanted
+        : magnet(wanted, words ? [1] : sizes, STAGE_SNAP_PIXELS / acrossPx);
       onUpdateClipLayout(
         layer.clip.id,
-        { ...start, scale: clamp(start.scale * (now / reach), 0.08, MAX_ZOOM) },
+        { ...start, scale: clamp(scale, 0.08, MAX_ZOOM) },
         momentInClip,
       );
     };
@@ -2817,7 +3290,7 @@ export function EditorShell({
   const playheadOffset = timeToPixels(currentTime);
 
   /** The gradient and padding only make sense behind a picture frame. */
-  const framed = visualLayers.length > 0 && audioCard == null;
+  const framed = shownLayers.length > 0 && audioCard == null;
 
   return (
     <div
@@ -2961,15 +3434,23 @@ export function EditorShell({
           </div>
 
           {/* preview canvas */}
-          <div className="ed-canvas" ref={canvasRef}>
+          <div
+            className="ed-canvas"
+            ref={canvasRef}
+            onPointerDown={(e) => {
+              // A press anywhere in the preview that is not on a picture
+              // drops the selection, so the frame and its handles go away
+              // rather than staying on whatever was touched last. Pressing
+              // a picture selects it again — that is the layer's own
+              // handler, and this one leaves it alone.
+              if (!(e.target as HTMLElement).closest(".ed-layer")) {
+                onSelectClips([]);
+              }
+            }}
+          >
             <div
               className={`ed-backdrop ${framed ? "" : "is-empty"}`}
               style={stageStyle}
-              onPointerDown={(e) => {
-                // Pressing the backdrop itself, clear of every layer,
-                // drops the selection.
-                if (e.target === e.currentTarget) onSelectClips([]);
-              }}
             >
               {framed && hasBackdrop(backdropKind) && (
                 <canvas className="ed-backdrop-paint" ref={backdropRef} />
@@ -2987,7 +3468,9 @@ export function EditorShell({
                     controls
                   />
                 </div>
-              ) : visualLayers.length === 0 ? (
+              ) : (
+                <>
+              {shownLayers.length === 0 && (
                 <div className="ed-preview-state">
                   {audioLayers.length > 0 && (
                     <Icon name="speaker" className="ed-audio-glyph" />
@@ -3016,7 +3499,11 @@ export function EditorShell({
                     </button>
                   )}
                 </div>
-              ) : (
+              )}
+              {/* The stack is mounted even when nothing is showing yet: a
+                  clip warming up for its entrance lives here, invisible,
+                  and taking it off the stage would undo the warming. */}
+              {visualLayers.length > 0 && (
                 // The stack. Layers are drawn in track order, so a clip on
                 // a lower track in the list lies over the ones above it,
                 // and each is placed by its own layout rather than filling
@@ -3046,7 +3533,10 @@ export function EditorShell({
                         style={{
                           zIndex: layer.depth + 1,
                           opacity: layer.opacity,
-                          width: `${layer.layout.scale * 100}%`,
+                          // Mounted early and invisible: it must not take
+                          // a press meant for the picture behind it.
+                          pointerEvents: layer.warming ? "none" : undefined,
+                          width: `${boxScale(layer.clip, layer.layout.scale) * 100}%`,
                           left: `${(0.5 + layer.layout.x) * 100}%`,
                           top: `${(0.5 + layer.layout.y) * 100}%`,
                           // Its own shape, so an overlay isn't letterboxed
@@ -3062,13 +3552,32 @@ export function EditorShell({
                               : "16 / 9",
                         }}
                         onPointerDown={(e) => startLayerGesture(e, layer, "move")}
+                        onContextMenu={(e) => {
+                          // The stand-in shown for a sidebar selection is
+                          // not part of the edit, so there is nothing to
+                          // lay out.
+                          if (!layer.movable) return;
+                          e.preventDefault();
+                          e.stopPropagation();
+                          if (!selectedClipIds.includes(layer.clip.id)) {
+                            onSelectClips([layer.clip.id]);
+                          }
+                          setLayerMenu({
+                            clipId: layer.clip.id,
+                            x: e.clientX,
+                            y: e.clientY,
+                          });
+                        }}
                       >
                         {layer.clip.text ? (
                           <TextLayerCanvas
                             text={layer.clip.text}
                             layout={layer.textLayout ?? layer.layout}
-                            width={frameSize.width}
-                            height={frameSize.height}
+                            // The drawing covers the frame, so it is made
+                            // at the frame's size — `frameSize` is the
+                            // stage's, which is the frame less the padding.
+                            width={frameSize.width * frameWide}
+                            height={frameSize.height * frameHigh}
                           />
                         ) : layer.item.status === "preparing" ? (
                           <div className="ed-layer-preparing">
@@ -3119,24 +3628,56 @@ export function EditorShell({
                           />
                         )}
 
-                        {selected && layer.movable && (
-                          <>
-                            {(["nw", "ne", "sw", "se"] as const).map((corner) => (
-                              <span
-                                key={corner}
-                                className={`ed-layer-handle is-${corner}`}
-                                onPointerDown={(e) =>
-                                  startLayerGesture(e, layer, "resize")
-                                }
-                                title="Drag to resize this layer"
-                              />
-                            ))}
-                          </>
-                        )}
+
+                      </div>
+                    );
+                  })}
+
+                  {/* The marks around the layer being worked on: the ring
+                      and the four corners.
+                      
+                      Drawn here rather than inside the layer, above every
+                      picture on the stage. A layer covering the frame —
+                      a title, or footage set to Full Layer — sits over
+                      whatever is below it, handles and all, and a handle
+                      that cannot be pressed is not a handle. The marks
+                      themselves let the pointer through; only the corners
+                      take it, so pressing the picture still moves it. */}
+                  {visualLayers.map((layer) => {
+                    if (
+                      !layer.movable ||
+                      layer.warming ||
+                      !selectedClipIds.includes(layer.clip.id)
+                    ) {
+                      return null;
+                    }
+                    const marks = marksFor(layer);
+                    return (
+                      <div
+                        key={`marks:${layer.clip.id}`}
+                        className="ed-layer-marks"
+                        ref={layerMarksRef(layer.clip.id)}
+                        style={marks.box}
+                      >
+                        {(["nw", "ne", "sw", "se"] as const).map((corner) => (
+                          <span
+                            key={corner}
+                            className={`ed-layer-handle is-${corner}`}
+                            style={marks.handles[corner]}
+                            onPointerDown={(e) => startLayerGesture(e, layer, "resize")}
+                            title={
+                              isTextClip(layer.clip)
+                                ? "Drag to resize the words"
+                                : "Drag to resize this layer"
+                            }
+                          />
+                        ))}
                       </div>
                     );
                   })}
                 </div>
+              )}
+                </>
               )}
 
               {/* Audio on a track is heard, not seen. */}
@@ -4410,6 +4951,94 @@ Right-click for audio options`}
             <Icon name="trash" />
             <span>Delete track</span>
           </button>
+        </div>
+      )}
+
+      {layerMenu && layerMenuTarget && (
+        <div
+          className="ed-clipmenu"
+          role="menu"
+          style={{
+            left: Math.min(layerMenu.x, window.innerWidth - 190),
+            top: Math.min(layerMenu.y, window.innerHeight - 250),
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
+            title="Cover the whole frame, edge to edge, cropping whatever will not fit"
+            onClick={() =>
+              setLayerLayout(
+                layerMenuTarget,
+                placeInFrame(layerMenuTarget, 1, 1, "centre", "middle", "cover"),
+              )
+            }
+          >
+            <PlaceMark wide={1} high={1} across="centre" down="middle" />
+            <span>Full Layer</span>
+          </button>
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
+            title="Inside the padding, with the whole picture showing"
+            onClick={() =>
+              setLayerLayout(layerMenuTarget, {
+                // Inside the padded inset rather than inside the frame:
+                // told to fit, a layer the same shape as the frame would
+                // otherwise come out exactly as large as Full Layer, and
+                // an entry that does nothing visible is an entry that
+                // lies. This is the resting place the padding describes,
+                // which is what the picture beside it draws.
+                scale: Math.min(1, shapeOfLayer(layerMenuTarget) / stageShape),
+                x: 0,
+                y: 0,
+              })
+            }
+          >
+            <PlaceMark wide={0.82} high={0.82} across="centre" down="middle" />
+            <span>Fit In Frame</span>
+          </button>
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
+            title="Leave its size alone and bring it to the middle"
+            onClick={() =>
+              setLayerLayout(layerMenuTarget, {
+                ...layerMenuTarget.layout,
+                x: 0,
+                y: 0,
+              })
+            }
+          >
+            <PlaceMark wide={0.5} high={0.5} across="centre" down="middle" />
+            <span>Centre</span>
+          </button>
+          <div className="ed-clipmenu-rule" />
+          {(
+            [
+              ["Top Left", "left", "top"],
+              ["Top Right", "right", "top"],
+              ["Bottom Left", "left", "bottom"],
+              ["Bottom Right", "right", "bottom"],
+            ] as const
+          ).map(([label, across, down]) => (
+            <button
+              key={label}
+              className="ed-clipmenu-item"
+              role="menuitem"
+              title={`A quarter of the frame, flush into the ${label.toLowerCase()} corner`}
+              onClick={() =>
+                setLayerLayout(
+                  layerMenuTarget,
+                  placeInFrame(layerMenuTarget, 0.5, 0.5, across, down),
+                )
+              }
+            >
+              <PlaceMark wide={0.5} high={0.5} across={across} down={down} />
+              <span>{label}</span>
+            </button>
+          ))}
         </div>
       )}
 

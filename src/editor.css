@@ -30,6 +30,12 @@
   --ed-shadow-md: 0 6px 18px rgba(6, 40, 22, 0.12);
   --ed-checker-a: #e2f1e8;
   --ed-checker-b: #f1faf5;
+  /* The two hairlines that mark where the finished picture ends. One dark
+     against pale footage, one pale against the chequerboard, so whatever
+     is playing, one of them is visible. */
+  --ed-frame-ring: rgba(9, 32, 20, 0.88);
+  --ed-frame-ring-out: rgba(255, 255, 255, 0.95);
+  --ed-frame-lift: 0 10px 28px rgba(6, 40, 22, 0.26);
   /* Left red: it marks the playhead, and it has to stand out against
      everything green around it. */
   --ed-playhead: #ef4444;
@@ -72,6 +78,9 @@
     --ed-shadow-md: 0 8px 22px rgba(0, 0, 0, 0.45);
     --ed-checker-a: #141d17;
     --ed-checker-b: #1a241e;
+    --ed-frame-ring: rgba(0, 0, 0, 0.9);
+    --ed-frame-ring-out: rgba(237, 247, 241, 0.5);
+    --ed-frame-lift: 0 12px 32px rgba(0, 0, 0, 0.6);
     --ed-playhead: #f87171;
     --ed-audio: #6ea8ff;
   }
@@ -396,10 +405,34 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 14px;
-  box-shadow: var(--ed-shadow-md);
   overflow: hidden;
   position: relative;
+  /* Square corners, because the file has square corners. A video frame
+     cannot be rounded — there is nothing outside it to show through — so
+     the rounding this project asks for belongs to the footage inside the
+     frame, where the renderer also draws it. A rounded frame here was the
+     preview claiming a corner the export never writes. */
+  border-radius: 0;
+}
+
+/* Where the finished picture begins and ends.
+ *
+ * Two hairlines and a shadow, every one of them outside the frame — drawn
+ * in the workspace, never over the picture — so this border says where the
+ * edge is without putting anything into the file. That is also why it is a
+ * `box-shadow` and not a `border`: `box-sizing` is border-box throughout
+ * this file, so a border would eat into the frame, and the frame's size is
+ * the size the export works from.
+ *
+ * With no backdrop chosen the frame itself stays transparent and the
+ * workspace's chequerboard shows through, the way an empty layer reads
+ * everywhere else. What the renderer lays down underneath is black, since
+ * a video file has nothing outside it to show through. */
+.ed-shell .ed-backdrop:not(.is-empty) {
+  box-shadow:
+    0 0 0 1.5px var(--ed-frame-ring),
+    0 0 0 3.5px var(--ed-frame-ring-out),
+    var(--ed-frame-lift);
 }
 
 /* The backdrop itself, painted by the same code that paints it into the
@@ -455,17 +488,28 @@
 
 /* Only the layer that is being worked on wears a frame; the others should
    look like picture, not like UI. */
-.ed-shell .ed-layer.is-selected::after {
-  content: "";
+/* The marks around the layer being worked on: a ring on its edge and a
+   corner at each of the four.
+   
+   A box of its own, laid over every picture on the stage rather than
+   inside the layer it belongs to — a layer that covers the frame would
+   otherwise bury the handles of everything beneath it. On the edge and not
+   outside it, because the frame clips what reaches past it, and a ring
+   drawn two pixels beyond the edge is two pixels nobody ever sees. */
+.ed-shell .ed-layer-marks {
   position: absolute;
-  inset: -2px;
+  transform: translate(-50%, -50%);
+  z-index: 30;
   border: 1.5px solid var(--ed-accent);
-  border-radius: calc(var(--ed-radius, 12px) + 2px);
+  border-radius: var(--ed-radius, 12px);
+  /* The ring is a mark, not a surface: pressing inside it should reach the
+     picture and move it. Only the corners answer the pointer. */
   pointer-events: none;
 }
 
 .ed-shell .ed-layer-handle {
   position: absolute;
+  pointer-events: auto;
   width: 11px;
   height: 11px;
   border-radius: 3px;
@@ -542,8 +586,16 @@
   -webkit-user-drag: none;
 }
 
+/* No black fill here either.
+ *
+ * A video element that has just been created has nothing decoded, and a
+ * black background turns that moment into a black box — which a clip
+ * arriving with a transition then cross-fades over the picture it was
+ * meant to be dissolving into. The layer's box is the footage's own shape,
+ * so there are no bars for the black to fill in any case, and showing what
+ * is beneath while a frame is on its way is both truer and quieter. */
 .ed-shell .ed-video {
-  background: #000;
+  background: transparent;
 }
 
 /* No black fill: a PNG with transparency should show the backdrop it sits

@@ -271,6 +271,12 @@ export function buildExportPlan(
 
   const { width, height } = exportCanvas(media, settings.resolution, look.aspect);
   const geometry = frameGeometry(width, height, look);
+  /** A layer's scale is measured in stage widths, and a title's drawing
+   * covers the whole frame rather than the padded inset — words written on
+   * a film are written on the film. In stage widths the frame is this
+   * many, which is exactly what the preview puts a title's box at. */
+  const titleScale =
+    geometry.stage.width > 0 ? width / geometry.stage.width : 1;
 
   const byPath = new Map(media.map((item) => [item.path, item]));
   const clips: ExportPlanClip[] = [];
@@ -303,7 +309,7 @@ export function buildExportPlan(
           visual: true,
           audible: false,
           still: true,
-          scale: 1,
+          scale: titleScale,
           x: 0,
           y: 0,
           // Drawn at the stage's own size and laid over it whole. Its
@@ -319,7 +325,13 @@ export function buildExportPlan(
           // to play it at.
           speed: 1,
           volume: [],
-          zoom: sampleFraming(clip, wanted),
+          // The framing a transition puts it through, carried up to the
+          // frame the same way its resting size is: these are absolute
+          // widths to the renderer, not multiples of the one above.
+          zoom: sampleFraming(clip, wanted).map((point) => ({
+            ...point,
+            scale: point.scale * titleScale,
+          })),
         });
         continue;
       }

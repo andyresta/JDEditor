@@ -1452,6 +1452,7 @@ args: {}",
 
     const GREEN: (u8, u8, u8) = (0, 128, 0);
     const BLUE: (u8, u8, u8) = (0, 0, 255);
+    const RED: (u8, u8, u8) = (255, 0, 0);
 
     #[test]
     fn padding_lets_the_backdrop_show_around_the_footage() {
@@ -1492,6 +1493,55 @@ args: {}",
             assert!(
                 looks_like(pixel_at(&p.output_path, 2.0, x, y), BLUE),
                 "the footage should reach {where_}"
+            );
+        }
+    }
+
+    /// A title is drawn on the whole picture, padding included.
+    ///
+    /// The editor draws a title at the frame's own size and gives it a
+    /// scale that says so: the frame measured in stage widths. If this end
+    /// were to place it against the stage instead, the words would shrink
+    /// by the padding and slide with it, and the file would no longer be
+    /// the picture that was on screen. Rendered and read back rather than
+    /// asserted on the command, because the command is not the promise.
+    #[test]
+    fn a_title_covers_the_whole_frame_and_not_the_padded_inset() {
+        let (Some(blue), Some(green), Some(red)) = (
+            colour_source("jd-title-blue.mp4", "blue"),
+            colour_picture("jd-title-backdrop.png", "green", 640, 360),
+            // The drawing, made at the frame's size the way `renderTitles`
+            // makes it.
+            colour_picture("jd-title-words.png", "red", 640, 360),
+        ) else {
+            eprintln!("no ffmpeg to make test sources with; skipping");
+            return;
+        };
+
+        let mut p = padded_plan(&blue, Some(green), 0.0);
+        let mut title = clip(&red, 0.0, 4.0);
+        title.still = true;
+        title.audible = false;
+        title.rounded = false;
+        // 640 / 480: the frame, in stage widths.
+        title.scale = 640.0 / 480.0;
+        p.clips.push(title);
+        let out = std::env::temp_dir().join("jd-title-frame.mp4");
+        p.output_path = out.to_string_lossy().to_string();
+        run_plan(&p);
+
+        // The corners of the frame are outside the stage. The drawing has
+        // to reach them, or it was laid on the inset.
+        for (x, y, where_) in [
+            (4, 4, "the top left corner"),
+            (636, 4, "the top right corner"),
+            (4, 356, "the bottom left corner"),
+            (636, 356, "the bottom right corner"),
+            (320, 180, "the middle"),
+        ] {
+            assert!(
+                looks_like(pixel_at(&p.output_path, 2.0, x, y), RED),
+                "the title should cover {where_}"
             );
         }
     }

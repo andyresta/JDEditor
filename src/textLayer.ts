@@ -20,17 +20,37 @@ const PANEL_PAD_X = 0.42;
 const PANEL_PAD_Y = 0.2;
 const LINE_SPACING = 1.25;
 
-export function drawTextLayer(
+/** Everything that both drawing a title and drawing a ring round it need
+ * to know.
+ *
+ * One function, so the two cannot drift: the box the editor puts round the
+ * words is worked out by the same arithmetic that puts the words there,
+ * not by a second guess at it. Leaves the context's font set, ready to be
+ * drawn with. */
+interface TitleMetrics {
+  lines: string[];
+  fontSize: number;
+  lineHeight: number;
+  blockHeight: number;
+  widest: number;
+  centreX: number;
+  centreY: number;
+}
+
+function measureTitle(
   ctx: CanvasRenderingContext2D,
   text: TextStyle,
   layout: ClipLayout,
   width: number,
   height: number,
-): void {
-  ctx.clearRect(0, 0, width, height);
+): TitleMetrics {
 
   const lines = text.content.split("\n");
-  const fontSize = Math.max(1, text.size * height);
+  // Measured against the frame's height, then by whatever the layout says:
+  // the size in the Text panel is the title's own, and dragging a corner
+  // on the stage scales it from there. Both ends draw with this function,
+  // so the words come out the same size in the file as on screen.
+  const fontSize = Math.max(1, text.size * height * (layout.scale || 1));
   const font = `${text.bold ? 700 : 500} ${fontSize}px ${TEXT_FONT_STACK}`;
   ctx.font = font;
   ctx.textAlign = "center";
@@ -47,6 +67,20 @@ export function drawTextLayer(
   // the frame from its centre.
   const centreX = (0.5 + layout.x) * width;
   const centreY = (0.5 + layout.y) * height;
+
+  return { lines, fontSize, lineHeight, blockHeight, widest, centreX, centreY };
+}
+
+export function drawTextLayer(
+  ctx: CanvasRenderingContext2D,
+  text: TextStyle,
+  layout: ClipLayout,
+  width: number,
+  height: number,
+): void {
+  ctx.clearRect(0, 0, width, height);
+  const { lines, fontSize, lineHeight, blockHeight, widest, centreX, centreY } =
+    measureTitle(ctx, text, layout, width, height);
 
   if (text.background) {
     const padX = fontSize * PANEL_PAD_X;
@@ -76,4 +110,45 @@ export function drawTextLayer(
     const y = centreY - blockHeight / 2 + lineHeight * (index + 0.5);
     ctx.fillText(line, centreX, y);
   });
+}
+
+/** A canvas kept aside for measuring — text cannot be measured without
+ * one. Never drawn to, never shown. */
+let scratch: CanvasRenderingContext2D | null | undefined;
+function measuringContext(): CanvasRenderingContext2D | null {
+  if (scratch === undefined) {
+    scratch = document.createElement("canvas").getContext("2d");
+  }
+  return scratch;
+}
+
+/** The box the words fill, in pixels of the frame they are drawn on.
+ *
+ * What the editor draws its ring and handles around. A title's drawing
+ * covers the whole frame — it has to, so that the renderer can lay it over
+ * the picture with no arithmetic of its own — but nearly all of it is
+ * empty, and a ring round the empty part says nothing about what is being
+ * held. Null when there is nothing to measure. */
+export function textBounds(
+  text: TextStyle,
+  layout: ClipLayout,
+  width: number,
+  height: number,
+): { x: number; y: number; width: number; height: number } | null {
+  const ctx = measuringContext();
+  if (!ctx || width <= 0 || height <= 0) return null;
+  const m = measureTitle(ctx, text, layout, width, height);
+  if (m.widest <= 0 || m.blockHeight <= 0) return null;
+  // The panel behind the words, where there is one, is part of what is
+  // seen, so it is part of what is ringed.
+  const padX = text.background ? m.fontSize * PANEL_PAD_X : 0;
+  const padY = text.background ? m.fontSize * PANEL_PAD_Y : 0;
+  const boxWidth = m.widest + padX * 2;
+  const boxHeight = m.blockHeight + padY * 2;
+  return {
+    x: m.centreX - boxWidth / 2,
+    y: m.centreY - boxHeight / 2,
+    width: boxWidth,
+    height: boxHeight,
+  };
 }
