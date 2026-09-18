@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// One ffmpeg run, writing one piece of the recording.
 struct Segment {
@@ -28,6 +28,9 @@ pub struct RecordingSession {
     output_path: PathBuf,
     /// Holds the individual segments until they're joined.
     parts_dir: PathBuf,
+    /// Follows the mouse for as long as this recording runs, when it was
+            /// asked for. Its readings are written beside the finished file.
+    cursor: Option<crate::cursor::Watcher>,
     finished: Vec<PathBuf>,
     /// Recorded time in `finished`, so the elapsed counter reports how
     /// much was recorded rather than how long ago it started.
@@ -133,6 +136,16 @@ impl RecordingSession {
         }
         let _ = std::fs::remove_dir(&self.parts_dir);
 
+        // Where the mouse went, put down beside the film it belongs to.
+        // (The ring, if there was one, is taken down by `stop`.)
+        // A failure here is not a failure of the recording: the picture
+        // is on disk and is what was asked for, and a missing trail costs
+        // only the automatic zooms.
+        if let Some(cursor) = self.cursor.take() {
+            let track = cursor.finish();
+            let _ = crate::cursor::write(&self.output_path, &track);
+        }
+
         Ok(self.output_path.to_string_lossy().to_string())
     }
 }
@@ -228,10 +241,62 @@ pub fn start(app: &tauri::AppHandle, config: RecordingConfig) -> Result<String, 
     std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
     let filename = timestamped_filename();
 
+    // What patch of screen is being captured, so the readings can be
+            // placed in the picture later. A window is followed wherever it
+            // goes, so there is no fixed patch to measure against and the
+            // pointer is not worth following for one.
+    // Neither the trail nor the ring makes sense without a patch of
+    // screen to measure against: a window is followed wherever it is
+    // moved to, and a camera recording has no screen in it at all.
+    let over_the_screen =
+        !config.camera_only && config.window_title.is_none() && crate::cursor::can_follow();
+    let keeping = over_the_screen && config.track_cursor;
+    let ringing = over_the_screen && config.highlight_cursor;
+    let cursor = (keeping || ringing).then(|| {
+        let rect = config.area.unwrap_or(crate::models::Rect {
+            x: screen.x,
+            y: screen.y,
+            width: screen.width,
+            height: screen.height,
+        });
+        // The same trimming the capture itself does, or the readings
+        // would be measured against a picture a pixel wider than the one
+        // that was recorded.
+        let origin = (rect.x, rect.y);
+        let size = (rect.width & !1, rect.height & !1);
+
+        let report: Option<crate::cursor::Report> = if ringing {
+            let app = app.clone();
+            // The window is created on the main thread, as every window
+            // must be on Windows.
+            let opening = app.clone();
+            let _ = crate::overlay::on_main_thread(&app, move || {
+                let _ = crate::halo::open(&opening, origin, size);
+            });
+            Some(Box::new(move |x, y, down| {
+                // In the ring window's own coordinates: it sits at the
+                // corner of what is being captured.
+                let _ = app.emit(
+                    "cursor-at",
+                    crate::halo::HaloAt {
+                        x: x - origin.0,
+                        y: y - origin.1,
+                        down,
+                    },
+                );
+            }))
+        } else {
+            None
+        };
+
+        crate::cursor::Watcher::watch(origin, size, keeping, report)
+    });
+
     let mut session = RecordingSession {
         config,
         screen,
         screen_index,
+        cursor,
         parts_dir: output_dir.join(format!(".{filename}.parts")),
         output_path: output_dir.join(&filename),
         finished: Vec::new(),
@@ -257,6 +322,11 @@ pub fn pause(app: &tauri::AppHandle) -> Result<(), String> {
         .ok_or_else(|| "No recording is in progress".to_string())?;
 
     session.end_segment();
+    // The pointer wanders while a recording is paused, and none of that
+    // wandering is in the film.
+    if let Some(cursor) = session.cursor.as_ref() {
+        cursor.pause();
+    }
     Ok(())
 }
 
@@ -269,6 +339,9 @@ pub fn resume(app: &tauri::AppHandle) -> Result<(), String> {
 
     if session.active.is_some() {
         return Ok(());
+    }
+    if let Some(cursor) = session.cursor.as_ref() {
+        cursor.resume();
     }
     session.start_segment()
 }
@@ -309,6 +382,7 @@ pub fn discard(app: &tauri::AppHandle) -> Result<(), String> {
 
     session.end_segment();
     session.discard();
+    crate::halo::close(app);
     Ok(())
 }
 
@@ -322,6 +396,10 @@ pub fn stop(app: &tauri::AppHandle) -> Result<String, String> {
     };
 
     session.end_segment();
+    // Down before the joining starts: it has done its work, and leaving
+    // it up while ffmpeg concatenates would put a ring on the screen with
+    // nothing recording it.
+    crate::halo::close(app);
     session.finish()
 }
 
@@ -814,6 +892,8 @@ mod tests {
             area: None,
             window_title: None,
             camera_only: false,
+            track_cursor: false,
+            highlight_cursor: false,
             include_webcam: false,
             webcam_id: None,
             include_audio: false,

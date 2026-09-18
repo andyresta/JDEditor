@@ -11,6 +11,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { audioGraph } from "../audioGraph";
 import {
   drawBackdrop,
@@ -35,6 +36,12 @@ import {
   FRAME_SHAPES,
   FRAME_SHAPE_LABELS,
   shapeRatio,
+  CAPTION_LANGUAGES,
+  notesInOrder,
+  type ProjectNote,
+  CAPTION_WORD_COUNTS,
+  type CaptionProgress,
+  type SpeechEngine,
   MAX_SPEED,
   mediaSpan,
   mediaTimeAt,
@@ -52,6 +59,7 @@ import {
   isTextClip,
   layoutAt,
   DEFAULT_CLIP_SECONDS,
+  DEFAULT_TEXT_SECONDS,
   formatDuration,
   formatGainDb,
   toMillis,
@@ -113,7 +121,9 @@ interface EditorShellProps {
    * measured in. */
   onUpdateClipLayout: (clipId: string, layout: ClipLayout, atSeconds: number) => void;
   onAddLayoutPoint: (clipId: string, atSeconds: number, layout: ClipLayout) => void;
-  onAddTextClip: (trackId: string, atSeconds: number) => void;
+  /** Puts a title on the timeline. A null track means there was no room
+   * on any of them, and it needs one of its own. */
+  onAddTextClip: (trackId: string | null, atSeconds: number) => void;
   onUpdateText: (clipId: string, text: TextStyle) => void;
   onRemoveLayoutPoint: (clipId: string, atSeconds: number) => void;
   onToggleClipMute: (clipId: string) => void;
@@ -149,6 +159,33 @@ interface EditorShellProps {
   /** Cuts at a moment on the timeline — one clip by id, or every clip
    * under the playhead. Answers with how many were cut. */
   onCutAt: (atSeconds: number, clipId?: string) => number;
+  /** Turns the clicks a screen recording caught into zoom points.
+   * Answers with how many zooms were made, or -1 when the recording was
+   * made without the mouse being followed. */
+  onAutoZoom: (clipId: string) => Promise<number>;
+  /** Opens the recorder. Whatever is recorded lands in this project's
+   * media, and the editor comes back with it. */
+  onRecord: () => void;
+  /** Every transcription service on offer, whether a key has been put in
+   * for it, and which one auto caption will use. Never the keys. */
+  speechEngines: SpeechEngine[];
+  /** Puts a key in for one service, or clears it when given nothing. */
+  onSaveSpeechKey: (engine: string, key: string) => void;
+  /** Marks one service as the one auto caption uses. */
+  onChooseSpeechEngine: (engine: string) => void;
+  onAutoCaption: (language: string, wordsPerCaption: number) => void;
+  /** How far a transcription has got, or null when none is running. */
+  captionRun: CaptionProgress | null;
+  captionError: string | null;
+  /** Notes pinned along the timeline: reminders for whoever is editing,
+   * never part of the picture. */
+  notes: ProjectNote[];
+  /** Pins a new one and answers with it, so it can be opened for writing
+   * at once. */
+  onAddNote: (atSeconds: number) => ProjectNote;
+  onUpdateNote: (id: string, text: string) => void;
+  onMoveNote: (id: string, atSeconds: number) => void;
+  onRemoveNote: (id: string) => void;
 }
 
 /** Where the volume line sits inside a clip, top and bottom, as a
@@ -181,6 +218,14 @@ const SNAP_PIXELS = 6;
  * file already cached and served from this machine. A recording read off
  * disk is slower, so the lead is generous — it costs one paused element. */
 const WARM_SECONDS = 1.5;
+
+/** What the panel on the right may be dragged between, and where a
+ * double-click on its edge puts it back to. Narrow enough that the
+ * controls still fit their labels, wide enough to read a long note or a
+ * key without scrolling sideways. */
+const INSPECTOR_NARROWEST = 240;
+const INSPECTOR_WIDEST = 620;
+const INSPECTOR_DEFAULT = 300;
 
 /** How close a layer's edge has to come to the frame's before it is taken
  * there exactly. In pixels rather than in fractions of the frame, so the
@@ -229,6 +274,49 @@ function volumeCurve(points: VolumePoint[], durationSeconds: number): string {
     path.push(`${(along * 100).toFixed(2)},${volumeY(gain).toFixed(2)}`);
   }
   return path.join(" ");
+}
+
+/** Puts an open menu where it actually fits, and says which way it opened.
+ *
+ * Measured after the menu is laid out rather than guessed at from a
+ * constant. The guess is what hid `Split Audio`: the placement allowed
+ * 96 pixels for a menu that is nearly three times that, so a right-click
+ * on the timeline — which lives at the bottom of the window — pushed the
+ * last entries past the edge of the screen where nothing could reach
+ * them.
+ *
+ * `prefer` is the direction to open in when there is room either way. The
+ * timeline asks for "up" because there is rarely anything below it.
+ */
+const MENU_MARGIN = 8;
+
+function fitMenu(
+  element: HTMLElement | null,
+  at: { x: number; y: number },
+  prefer: "up" | "down",
+): void {
+  if (!element) return;
+  const { width, height } = element.getBoundingClientRect();
+  const room = { below: window.innerHeight - at.y, above: at.y };
+
+  const upwards =
+    prefer === "up"
+      ? room.above >= height + MENU_MARGIN || room.above >= room.below
+      : room.below < height + MENU_MARGIN && room.above > room.below;
+
+  let top = upwards ? at.y - height : at.y;
+  // Whichever way it went, it stays on the screen: a menu taller than the
+  // window is pinned to the top rather than hanging off either end.
+  top = Math.min(top, window.innerHeight - height - MENU_MARGIN);
+  top = Math.max(MENU_MARGIN, top);
+
+  const left = Math.max(
+    MENU_MARGIN,
+    Math.min(at.x, window.innerWidth - width - MENU_MARGIN),
+  );
+
+  element.style.left = left + "px";
+  element.style.top = top + "px";
 }
 
 /** A map of where a layer will sit: the frame, and the part of it the
@@ -338,7 +426,8 @@ type IconName =
   | "video"
   | "plus"
   | "close"
-  | "search";
+  | "search"
+  | "note";
 
 function Icon({ name, className }: { name: IconName; className?: string }) {
   return (
@@ -514,6 +603,15 @@ function iconPaths(name: IconName) {
           <path d="M15 15l5 5" />
         </>
       );
+    // A sheet with its corner turned: a note left for whoever is editing.
+    case "note":
+      return (
+        <>
+          <path d="M5 4h9l5 5v11H5z" />
+          <path d="M14 4v5h5" />
+          <path d="M8.5 13h7M8.5 16.5h4.5" />
+        </>
+      );
   }
 }
 
@@ -578,6 +676,7 @@ type SidebarTab =
   | "media"
   | "audio"
   | "text"
+  | "captions"
   | "transitions"
   | "speed"
   | "background";
@@ -586,6 +685,7 @@ const SIDEBAR_TABS: { id: SidebarTab; label: string }[] = [
   { id: "media", label: "Media" },
   { id: "audio", label: "Audio" },
   { id: "text", label: "Text" },
+  { id: "captions", label: "Captions" },
   { id: "transitions", label: "Transitions" },
   { id: "speed", label: "Speed" },
   { id: "background", label: "Background" },
@@ -814,6 +914,19 @@ export function EditorShell({
   onRemoveTrack,
   onRenameTrack,
   onCutAt,
+  onAutoZoom,
+  onRecord,
+  speechEngines,
+  onSaveSpeechKey,
+  onChooseSpeechEngine,
+  onAutoCaption,
+  captionRun,
+  captionError,
+  notes,
+  onAddNote,
+  onUpdateNote,
+  onMoveNote,
+  onRemoveNote,
 }: EditorShellProps) {
   const [toast, setToast] = useState<string | null>(null);
   /** Ctrl+K is bound once, for the life of the editor; it reaches the
@@ -822,6 +935,26 @@ export function EditorShell({
   const [showInspector, setShowInspector] = useState(true);
   const [showTimeline, setShowTimeline] = useState(true);
   const [activeTab, setActiveTab] = useState<SidebarTab>("media");
+  /** What is typed into each service's key box before it is saved. Held
+   * here and nowhere else: a saved key goes straight to the app's config
+   * folder and never comes back, so this is only ever what is on screen
+   * at this moment. */
+  const [typedKeys, setTypedKeys] = useState<Record<string, string>>({});
+  /** The note being read or written, and where on screen its panel
+   * goes. Null when none is open. */
+  const [openNote, setOpenNote] = useState<{ id: string; x: number; y: number } | null>(
+    null,
+  );
+  /** The note under the pointer, for the tooltip. */
+  const [hoverNote, setHoverNote] = useState<{ id: string; x: number; y: number } | null>(
+    null,
+  );
+  /** Where a right-click on the ruler landed, offering a note there. */
+  const [noteMenu, setNoteMenu] = useState<{ x: number; y: number; at: number } | null>(
+    null,
+  );
+  const [captionLanguage, setCaptionLanguage] = useState("");
+  const [captionWords, setCaptionWords] = useState(4);
   const [shapeMenuOpen, setShapeMenuOpen] = useState(false);
   /** The box being dragged across the timeline to pick clips out, in the
    * coordinates of the window. Null when nothing is being dragged. */
@@ -857,7 +990,16 @@ export function EditorShell({
 
   // Appearance and timeline zoom live in the project now, so every one of
   // them is read from props and written back through onSettingsChange.
-  const { aspect, backdropKind, category, swatch, padding, rounded, timelineZoom } =
+  const {
+    aspect,
+    backdropKind,
+    category,
+    swatch,
+    padding,
+    rounded,
+    timelineZoom,
+    inspectorWidth = INSPECTOR_DEFAULT,
+  } =
     settings;
 
   const settingsRef = useRef(settings);
@@ -964,6 +1106,9 @@ export function EditorShell({
   /** Written to directly while playing — see the animation-frame effect. */
   const timecodeRef = useRef<HTMLSpanElement | null>(null);
   const playheadRef = useRef<HTMLDivElement | null>(null);
+  /** The grip at the top of the playhead. It lives in the ruler rather
+   * than on the line, so it cannot come down over the first clip. */
+  const playheadHeadRef = useRef<HTMLSpanElement | null>(null);
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
   const rulerRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -1749,6 +1894,9 @@ export function EditorShell({
     if (playheadRef.current) {
       playheadRef.current.style.transform = `translateX(${offset}px)`;
     }
+    if (playheadHeadRef.current) {
+      playheadHeadRef.current.style.transform = `translateX(${offset}px)`;
+    }
 
     // Zoomed in far enough the playhead runs off the edge; follow it so
     // the moving part stays on screen. The track-name column sits at the
@@ -2136,18 +2284,32 @@ export function EditorShell({
       .flatMap((track) => track.clips)
       .find((clip) => selectedClipIds.includes(clip.id) && clip.text) ?? null;
 
-  /** A track with nothing on it at this moment, preferred for a title: a
-   * title is something laid over the picture, and dropping one onto busy
-   * track would cut a hole in the footage to make room. */
-  function freeVideoTrackAt(seconds: number): string | null {
+  /** A track with room for a title across the whole of its length, or
+   * null when there is none.
+   *
+   * Null means a new track, and that matters: a clip put down on a track
+   * takes the room it needs, cutting away whatever it covers. That is the
+   * right rule for footage being dragged into place and the wrong one for
+   * a title, which is laid *over* the picture and should never be able to
+   * delete it. Falling back to "the first video track" is what let a
+   * title swallow a cut a clip the moment every track was busy.
+   *
+   * The whole span is checked rather than the instant at the playhead: a
+   * title is five seconds long, and a clip starting a second later would
+   * be eaten by a title that looked, at the playhead, as though it had
+   * somewhere to go. */
+  function freeVideoTrackAt(seconds: number, length: number): string | null {
+    const ends = seconds + length;
+    // A thousandth of a second: clips that merely touch do not overlap.
+    const touch = 1e-3;
     const busy = (track: TimelineTrack) =>
       track.clips.some(
         (clip) =>
-          seconds >= clip.startSeconds &&
-          seconds < clip.startSeconds + clip.durationSeconds,
+          clip.startSeconds < ends - touch &&
+          clip.startSeconds + clip.durationSeconds > seconds + touch,
       );
     const video = tracks.filter((track) => trackKindOf(track) === "video");
-    return (video.find((track) => !busy(track)) ?? video[0] ?? tracks[0])?.id ?? null;
+    return video.find((track) => !busy(track))?.id ?? null;
   }
 
   function addTextClip() {
@@ -2155,14 +2317,82 @@ export function EditorShell({
     // began half a thousandth of a second after the playhead would be
     // added and then not be on screen, which reads as nothing happening.
     const at = toMillis(currentTime);
-    const trackId = freeVideoTrackAt(at);
-    if (!trackId) {
-      setToast("Add a track to put a title on.");
-      return;
-    }
+    // Null when every track is occupied here: the title then gets a track
+    // of its own rather than taking a bite out of somebody's footage.
+    const trackId = freeVideoTrackAt(at, DEFAULT_TEXT_SECONDS);
     onAddTextClip(trackId, at);
+    if (!trackId) setToast("Title added on a new track.");
     scrubTo(at);
     setActiveTab("text");
+  }
+
+  /** Presses on a note: a press and release opens it, a press and drag
+   * moves it to another moment. The note is a pin in the margin, and a
+   * pin that cannot be moved when the edit shifts under it is a pin in
+   * the wrong place. */
+  function startNoteDrag(event: ReactPointerEvent<HTMLElement>, note: ProjectNote) {
+    if (event.button !== 0) return;
+    event.stopPropagation();
+    const origin = event.clientX;
+    let moved = false;
+
+    const onMove = (e: PointerEvent) => {
+      if (!moved && Math.abs(e.clientX - origin) < 3) return;
+      moved = true;
+      setHoverNote(null);
+      onMoveNote(note.id, secondsAtPointerRef.current(e.clientX));
+    };
+    const onUp = (e: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      if (moved) return;
+      // A press that never moved is a click: show what it says.
+      const at = (e.target as HTMLElement).closest(".ed-note-mark");
+      const box = at?.getBoundingClientRect();
+      setHoverNote(null);
+      setOpenNote({
+        id: note.id,
+        x: box ? box.left : e.clientX,
+        y: box ? box.bottom + 6 : e.clientY,
+      });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  /** Drags the panel's edge.
+   *
+   * Written straight to the element while the pointer moves and put into
+   * the settings once it is let go: a width in React state would rebuild
+   * the whole editor on every pixel, and the picture inside it is being
+   * laid out from measurements as it goes. */
+  function startInspectorResize(event: ReactPointerEvent<HTMLElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const panel = event.currentTarget.parentElement as HTMLElement | null;
+    if (!panel) return;
+    const from = event.clientX;
+    const was = panel.getBoundingClientRect().width;
+    let latest = was;
+
+    const onMove = (e: PointerEvent) => {
+      // Leftwards is wider: the panel is on the right.
+      const wanted = was + (from - e.clientX);
+      latest = Math.round(
+        Math.min(INSPECTOR_WIDEST, Math.max(INSPECTOR_NARROWEST, wanted)),
+      );
+      panel.style.width = `${latest}px`;
+      panel.style.minWidth = `${latest}px`;
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.classList.remove("ed-resizing-cols");
+      if (latest !== was) patchSettings({ inspectorWidth: latest });
+    };
+    document.body.classList.add("ed-resizing-cols");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   }
 
   function addZoomPoint() {
@@ -2514,11 +2744,34 @@ export function EditorShell({
 
   // The menu closes on the next thing that happens anywhere, the way every
   // context menu does.
+  /** The panels that are measured once laid out and then placed. */
+  const clipMenuRef = useRef<HTMLDivElement | null>(null);
+  const layerMenuRef = useRef<HTMLDivElement | null>(null);
+  const noteMenuRef = useRef<HTMLDivElement | null>(null);
+  const noteEditorRef = useRef<HTMLDivElement | null>(null);
+  const noteTipRef = useRef<HTMLDivElement | null>(null);
+
+  // Placed before the browser paints, so nothing appears in one place and
+  // jumps to another.
+  useLayoutEffect(() => {
+    // A clip's menu opens upwards: the timeline sits at the foot of the
+    // window, and a menu opening down from there has nowhere to go.
+    if (clipMenu) fitMenu(clipMenuRef.current, clipMenu, "up");
+    // The preview's menu opens downwards, since the stage is at the top,
+    // and turns round by itself when it is near the bottom.
+    if (layerMenu) fitMenu(layerMenuRef.current, layerMenu, "down");
+    // A note lives on the ruler, with the whole timeline below it.
+    if (noteMenu) fitMenu(noteMenuRef.current, noteMenu, "down");
+    if (openNote) fitMenu(noteEditorRef.current, openNote, "down");
+    if (hoverNote) fitMenu(noteTipRef.current, hoverNote, "down");
+  }, [clipMenu, layerMenu, noteMenu, openNote, hoverNote]);
+
   useEffect(() => {
-    if (!clipMenu && !layerMenu) return;
+    if (!clipMenu && !layerMenu && !noteMenu) return;
     const close = () => {
       setClipMenu(null);
       setLayerMenu(null);
+      setNoteMenu(null);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
@@ -2534,7 +2787,28 @@ export function EditorShell({
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", close, true);
     };
-  }, [clipMenu, layerMenu]);
+  }, [clipMenu, layerMenu, noteMenu]);
+
+  // A note's panel closes on Escape, or on a press anywhere outside it.
+  // Not on scroll, unlike the menus: it is being written in, and the
+  // timeline scrolling underneath is no reason to lose what was typed.
+  useEffect(() => {
+    if (!openNote) return;
+    const close = (event: Event) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest?.(".ed-note-panel")) return;
+      setOpenNote(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpenNote(null);
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [openNote]);
 
   /** What a press on a clip does to the selection.
    *
@@ -2692,6 +2966,39 @@ export function EditorShell({
    * and so cannot read a value that only exists during a render. */
   const boxScaleRef = useRef(boxScale);
   boxScaleRef.current = boxScale;
+
+  /** The part of a title's drawing that answers the pointer, as
+   * percentages of its own box — or null when there is nothing to press.
+   *
+   * A title's drawing covers the whole frame, because that is how it is
+   * laid over the picture, but nearly all of it is empty. Left as it was,
+   * that emptiness swallowed every press meant for the footage
+   * underneath: right-clicking a clip to resize it picked the caption
+   * lying over it instead. So the drawing itself takes no pointer at all
+   * and this one box, around the words, takes it back.
+   *
+   * In percentages rather than pixels so a transition that moves or
+   * scales the drawing carries the words' box along with it. */
+  function wordsBox(layer: Layer): CSSProperties | null {
+    if (!isTextClip(layer.clip) || !layer.clip.text) return null;
+    const bounds = textBounds(
+      layer.clip.text,
+      layer.textLayout ?? layer.layout,
+      geometry.width,
+      geometry.height,
+    );
+    if (!bounds || geometry.width <= 0 || geometry.height <= 0) return null;
+    return {
+      position: "absolute",
+      left: `${(bounds.x / geometry.width) * 100}%`,
+      top: `${(bounds.y / geometry.height) * 100}%`,
+      width: `${(bounds.width / geometry.width) * 100}%`,
+      height: `${(bounds.height / geometry.height) * 100}%`,
+      // The drawing above it is transparent to the pointer; this is the
+      // piece that is not.
+      pointerEvents: "auto",
+    };
+  }
 
   /** The ring and the four corners drawn around a selected layer: where
    * the ring goes, and where each handle goes within it.
@@ -2895,16 +3202,10 @@ export function EditorShell({
     event.stopPropagation();
 
     // The stand-in layer for a sidebar selection isn't part of the edit:
-    // there is nothing to select and nothing to move, but pressing the
-    // picture should still start and stop playback.
-    if (!layer.movable) {
-      const onClickUp = () => {
-        window.removeEventListener("pointerup", onClickUp);
-        togglePlay();
-      };
-      window.addEventListener("pointerup", onClickUp);
-      return;
-    }
+    // there is nothing to select and nothing to move. Playback is started
+    // by a double press on the stage, handled where the whole preview can
+    // hear it rather than on any one layer.
+    if (!layer.movable) return;
     selectClip(layer.clip.id, event);
 
     const frame = stage.getBoundingClientRect();
@@ -3031,9 +3332,10 @@ export function EditorShell({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       setDraggingLayerId(null);
-      // A press that never moved is a click, and a click on the picture
-      // has always started and stopped playback.
-      if (!moved && mode === "move") togglePlay();
+      // A press that never moved is simply a press: it picks the layer
+      // out and leaves it at that. Playback used to start here, which
+      // meant every attempt to select a clip, or to nudge it and think
+      // better of it, set the film running.
     };
 
     setDraggingLayerId(layer.clip.id);
@@ -3437,6 +3739,19 @@ export function EditorShell({
           <div
             className="ed-canvas"
             ref={canvasRef}
+            // Two presses start and stop playback. One press selects, and
+            // nothing more — a single click is how a layer is picked up,
+            // and it should not also set the film running.
+            //
+            // Listened for here rather than on each layer so that the
+            // backdrop, the padding and the space around the frame answer
+            // too; a press on a picture bubbles up to this. The handles
+            // are the exception: a double press while resizing is still
+            // resizing.
+            onDoubleClick={(e) => {
+              if ((e.target as HTMLElement).closest(".ed-layer-handle")) return;
+              togglePlay();
+            }}
             onPointerDown={(e) => {
               // A press anywhere in the preview that is not on a picture
               // drops the selection, so the frame and its handles go away
@@ -3534,8 +3849,12 @@ export function EditorShell({
                           zIndex: layer.depth + 1,
                           opacity: layer.opacity,
                           // Mounted early and invisible: it must not take
-                          // a press meant for the picture behind it.
-                          pointerEvents: layer.warming ? "none" : undefined,
+                          // a press meant for the picture behind it. Nor
+                          // must a title, whose drawing is the whole
+                          // frame and mostly empty — it takes the pointer
+                          // back in one place only, around its words.
+                          pointerEvents:
+                            layer.warming || isTextClip(layer.clip) ? "none" : undefined,
                           width: `${boxScale(layer.clip, layer.layout.scale) * 100}%`,
                           left: `${(0.5 + layer.layout.x) * 100}%`,
                           top: `${(0.5 + layer.layout.y) * 100}%`,
@@ -3570,7 +3889,18 @@ export function EditorShell({
                         }}
                       >
                         {layer.clip.text ? (
-                          <TextLayerCanvas
+                          <>
+                            {/* Where the words are, and so where a press
+                                on this title lands. Invisible: the ring
+                                round the words is drawn with the rest of
+                                the marks, above every picture. Its events
+                                rise to the layer's own handlers, which is
+                                what selects and moves the title. */}
+                            {(() => {
+                              const box = wordsBox(layer);
+                              return box ? <span className="ed-layer-words" style={box} /> : null;
+                            })()}
+                            <TextLayerCanvas
                             text={layer.clip.text}
                             layout={layer.textLayout ?? layer.layout}
                             // The drawing covers the frame, so it is made
@@ -3578,7 +3908,8 @@ export function EditorShell({
                             // stage's, which is the frame less the padding.
                             width={frameSize.width * frameWide}
                             height={frameSize.height * frameHigh}
-                          />
+                            />
+                          </>
                         ) : layer.item.status === "preparing" ? (
                           <div className="ed-layer-preparing">
                             <span className="spinner spinner-lg" />
@@ -3788,7 +4119,22 @@ export function EditorShell({
 
         {/* ------------------------------------------------- inspector */}
         {showInspector && (
-          <aside className="ed-inspector">
+          <aside
+            className="ed-inspector"
+            style={{ width: inspectorWidth, minWidth: inspectorWidth }}
+          >
+            {/* The edge, which can be taken hold of. Dragging left gives
+                the panel more room and the picture less; the limits keep
+                either from being squeezed to nothing. */}
+            <div
+              className="ed-inspector-grip"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Drag to resize this panel"
+              title="Drag to resize"
+              onPointerDown={startInspectorResize}
+              onDoubleClick={() => patchSettings({ inspectorWidth: INSPECTOR_DEFAULT })}
+            />
             <div className="ed-tabs">
               {SIDEBAR_TABS.map((tab) => (
                 <button
@@ -3839,6 +4185,14 @@ export function EditorShell({
 
                   <div className="ed-section-head">
                     <h3 className="ed-section-title">Media</h3>
+                    <button
+                      className="ed-chipbtn"
+                      title="Record the screen — or this editor — and bring it straight into this project"
+                      onClick={onRecord}
+                    >
+                      <Icon name="video" />
+                      <span>Recording</span>
+                    </button>
                     <button
                       className="ed-chipbtn"
                       onClick={() => onImportMedia("visual")}
@@ -4017,6 +4371,185 @@ export function EditorShell({
                 </>
               )}
 
+              {activeTab === "captions" && (
+                <>
+                  <div className="ed-section-head">
+                    <h3 className="ed-section-title">Auto caption</h3>
+                  </div>
+
+                  <p className="ed-muted ed-note">
+                    The sound of every clip that can be heard is sent to the
+                    service ticked below, which writes down what was said. The
+                    words come back as titles on a track of their own, and from
+                    then on they are ordinary clips: move them, retime them,
+                    restyle them, delete them.
+                  </p>
+
+                  <div className="ed-field">
+                    <label className="ed-field-label" htmlFor="ed-caption-language">
+                      Language
+                    </label>
+                    <select
+                      id="ed-caption-language"
+                      className="ed-select"
+                      value={captionLanguage}
+                      onChange={(e) => setCaptionLanguage(e.currentTarget.value)}
+                    >
+                      {CAPTION_LANGUAGES.map((language) => (
+                        <option key={language.code} value={language.code}>
+                          {language.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="ed-field">
+                    <label className="ed-field-label" htmlFor="ed-caption-words">
+                      Words per caption
+                    </label>
+                    <select
+                      id="ed-caption-words"
+                      className="ed-select"
+                      value={captionWords}
+                      onChange={(e) => setCaptionWords(Number(e.currentTarget.value))}
+                    >
+                      {CAPTION_WORD_COUNTS.map((count) => (
+                        <option key={count} value={count}>
+                          {count} words
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="ed-section-head">
+                    <h3 className="ed-section-title">Services</h3>
+                  </div>
+                  <p className="ed-muted ed-note">
+                    A key is a bill, so each service keeps its own. Tick the one
+                    to use; the others stay ready for when it is rate-limited or
+                    out of credit. Keys are kept in this app's settings folder,
+                    never in the project file, so sending someone a project
+                    cannot send them a key.
+                  </p>
+
+                  <div className="ed-engines">
+                    {speechEngines.map((engine) => {
+                      const typed = typedKeys[engine.id] ?? "";
+                      return (
+                        <div
+                          key={engine.id}
+                          className={`ed-engine ${engine.isDefault ? "is-default" : ""}`}
+                        >
+                          <label className="ed-engine-head">
+                            <input
+                              type="radio"
+                              name="ed-speech-engine"
+                              checked={engine.isDefault}
+                              disabled={!engine.hasKey}
+                              onChange={() => onChooseSpeechEngine(engine.id)}
+                            />
+                            <span className="ed-engine-name">
+                              {engine.provider} · {engine.model}
+                            </span>
+                            <span
+                              className={`ed-engine-state ${engine.hasKey ? "is-set" : ""}`}
+                            >
+                              {engine.hasKey ? "key saved" : "no key"}
+                            </span>
+                          </label>
+                          <p className="ed-engine-note">{engine.note}</p>
+                          <div className="ed-engine-key">
+                            <input
+                              className="ed-input"
+                              type="password"
+                              autoComplete="off"
+                              spellCheck={false}
+                              placeholder={engine.hasKey ? "Replace the key" : "Paste the key"}
+                              value={typed}
+                              onChange={(e) => {
+                                // Read out here, not inside the updater:
+                                // the updater runs after the event has
+                                // been handed back, and by then React has
+                                // emptied it — which took the whole
+                                // editor down on the first keystroke.
+                                const typing = e.currentTarget.value;
+                                setTypedKeys((all) => ({
+                                  ...all,
+                                  [engine.id]: typing,
+                                }));
+                              }}
+                            />
+                            <button
+                              className="ed-pill"
+                              disabled={typed.trim().length === 0}
+                              onClick={() => {
+                                onSaveSpeechKey(engine.id, typed.trim());
+                                setTypedKeys((all) => ({ ...all, [engine.id]: "" }));
+                              }}
+                            >
+                              Save
+                            </button>
+                            {engine.hasKey && (
+                              <button
+                                className="ed-pill"
+                                title="Forget this key"
+                                onClick={() => {
+                                  onSaveSpeechKey(engine.id, "");
+                                  setTypedKeys((all) => ({ ...all, [engine.id]: "" }));
+                                }}
+                              >
+                                Clear
+                              </button>
+                            )}
+                          </div>
+                          <button
+                            className="ed-engine-link"
+                            title={engine.keysAt}
+                            onClick={() => {
+                              void openUrl(engine.keysAt).catch(() =>
+                                setToast(engine.keysAt),
+                              );
+                            }}
+                          >
+                            Where to get a key
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {captionError && (
+                    <div className="ed-missing" role="alert">
+                      <p>{captionError}</p>
+                    </div>
+                  )}
+
+                  <button
+                    className="ed-pill ed-pill-primary ed-caption-go"
+                    disabled={captionRun != null || !speechEngines.some((e) => e.isDefault)}
+                    onClick={() => onAutoCaption(captionLanguage, captionWords)}
+                  >
+                    <Icon name="wand" />
+                    <span>
+                      {captionRun
+                        ? `Listening — clip ${Math.min(
+                            captionRun.done + 1,
+                            captionRun.total,
+                          )} of ${captionRun.total}`
+                        : "Write captions"}
+                    </span>
+                  </button>
+                  {captionRun?.engine && (
+                    <p className="ed-muted ed-note">Using {captionRun.engine}.</p>
+                  )}
+                  {!speechEngines.some((e) => e.isDefault) && (
+                    <p className="ed-muted ed-note">
+                      Put a key in above and tick a service to start.
+                    </p>
+                  )}
+                </>
+              )}
+
               {activeTab === "transitions" && (
                 <>
                   <div className="ed-section-head">
@@ -4110,9 +4643,13 @@ export function EditorShell({
                           }`}
                           aria-pressed={!selectedTransition && !transitionMixed}
                           onClick={() => pickTransition(null)}
+                          // Said plainly, because this is also how a
+                          // transition is taken off again, and "Cut" on
+                          // its own reads as something done to the clip.
+                          title="No transition: the two clips meet at a straight cut. Picking this takes off whatever was here."
                         >
                           <span className="ed-transition-art is-cut" aria-hidden="true" />
-                          <span>Cut</span>
+                          <span>None (cut)</span>
                         </button>
                         {TRANSITIONS.map((kind) => (
                           <button
@@ -4399,6 +4936,20 @@ export function EditorShell({
                 if (e.target === e.currentTarget) onSelectClips([]);
               }}
             >
+              {/* The strip the track names sit on, unbroken from the foot
+                  of the ruler to the last row.
+
+                  Each name has its own opaque background, but only for the
+                  height of its own row — and between rows there is a gap
+                  with nothing in it, which the playhead showed straight
+                  through as it scrolled behind the column. This fills
+                  those gaps and nothing else. */}
+              <span
+                className="ed-timeline-gutter"
+                style={{ height: tracksHeight }}
+                aria-hidden="true"
+              />
+
               <div className="ed-rulerrow">
                 <div className="ed-rulerrow-side" />
                 <div
@@ -4406,8 +4957,62 @@ export function EditorShell({
                   ref={rulerRef}
                   style={{ width: trackWidth }}
                   onMouseDown={startScrub}
-                  title="Drag to move playback"
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setNoteMenu({
+                      x: e.clientX,
+                      y: e.clientY,
+                      at: secondsAtPointer(e.clientX),
+                    });
+                  }}
+                  title="Drag to move playback · right-click to leave a note"
                 >
+                  {notesInOrder(notes).map((note) => (
+                    <button
+                      key={note.id}
+                      className={`ed-note-mark ${
+                        openNote?.id === note.id ? "is-open" : ""
+                      } ${note.text.trim() ? "" : "is-blank"}`}
+                      style={{ left: `${timeToPixels(note.atSeconds)}px` }}
+                      title={note.text.trim() || "An empty note"}
+                      aria-label={`Note at ${formatTimecode(note.atSeconds)}`}
+                      onMouseDown={(e) => {
+                        // The ruler beneath would otherwise take this as a
+                        // scrub and drag the playhead away from the note.
+                        e.stopPropagation();
+                      }}
+                      onPointerDown={(e) => startNoteDrag(e, note)}
+                      onMouseEnter={(e) => {
+                        const at = e.currentTarget.getBoundingClientRect();
+                        setHoverNote({
+                          id: note.id,
+                          x: at.left,
+                          y: at.bottom + 6,
+                        });
+                      }}
+                      onMouseLeave={() => setHoverNote(null)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onRemoveNote(note.id);
+                        setToast("Note removed.");
+                      }}
+                    >
+                      <Icon name="note" />
+                    </button>
+                  ))}
+
+                  {timelineHasClips && (
+                    <span
+                      className="ed-playhead-head"
+                      ref={playheadHeadRef}
+                      style={{ transform: `translateX(${playheadOffset}px)` }}
+                      onMouseDown={startScrub}
+                      title="Drag to move playback"
+                    />
+                  )}
+
                   {ruler.map((s) => (
                     <span
                       key={s}
@@ -4900,13 +5505,7 @@ Right-click for audio options`}
                     transform: `translateX(${playheadOffset}px)`,
                     height: tracksHeight,
                   }}
-                >
-                  <span
-                    className="ed-playhead-knob"
-                    onMouseDown={startScrub}
-                    title="Drag to move playback"
-                  />
-                </div>
+                />
               )}
             </div>
           </div>
@@ -4958,10 +5557,8 @@ Right-click for audio options`}
         <div
           className="ed-clipmenu"
           role="menu"
-          style={{
-            left: Math.min(layerMenu.x, window.innerWidth - 190),
-            top: Math.min(layerMenu.y, window.innerHeight - 250),
-          }}
+          ref={layerMenuRef}
+          style={{ left: layerMenu.x, top: layerMenu.y }}
           onPointerDown={(e) => e.stopPropagation()}
         >
           <button
@@ -5046,12 +5643,10 @@ Right-click for audio options`}
         <div
           className="ed-clipmenu"
           role="menu"
-          // Kept inside the window: a clip near the right or bottom edge
-          // would otherwise open its menu off-screen.
-          style={{
-            left: Math.min(clipMenu.x, window.innerWidth - 190),
-            top: Math.min(clipMenu.y, window.innerHeight - 96),
-          }}
+          ref={clipMenuRef}
+          // Where the pointer was. `fitMenu` moves it from here to
+          // wherever it fits, before anything is painted.
+          style={{ left: clipMenu.x, top: clipMenu.y }}
           onPointerDown={(e) => e.stopPropagation()}
         >
           <button
@@ -5124,6 +5719,27 @@ Right-click for audio options`}
           <button
             className="ed-clipmenu-item"
             role="menuitem"
+            title="Zoom in on everything that was clicked, from what the recorder wrote down while this was captured"
+            onClick={() => {
+              const clipId = clipMenu.clipId;
+              setClipMenu(null);
+              void onAutoZoom(clipId).then((made) => {
+                setToast(
+                  made > 0
+                    ? `${made} zoom${made === 1 ? "" : "s"} from the clicks in this clip.`
+                    : made < 0
+                      ? "This recording was made without the mouse being followed."
+                      : "No clicks were recorded inside this clip.",
+                );
+              });
+            }}
+          >
+            <Icon name="crop" />
+            <span>Auto Zoom to Clicks</span>
+          </button>
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
             disabled={!canSplitAudio}
             title={
               canSplitAudio
@@ -5140,6 +5756,87 @@ Right-click for audio options`}
             <Icon name="scissors" />
             <span>Split Audio</span>
           </button>
+        </div>
+      )}
+
+      {noteMenu && (
+        <div
+          className="ed-clipmenu"
+          role="menu"
+          ref={noteMenuRef}
+          style={{ left: noteMenu.x, top: noteMenu.y }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
+            title="Leave a reminder at this moment. It is never part of the picture."
+            onClick={() => {
+              const note = onAddNote(noteMenu.at);
+              setNoteMenu(null);
+              // Opened straight away with the cursor in it: a note nobody
+              // is asked to write is a yellow mark with nothing behind it.
+              setOpenNote({ id: note.id, x: noteMenu.x, y: noteMenu.y });
+            }}
+          >
+            <Icon name="note" />
+            <span>Add note here</span>
+            <span className="ed-clipmenu-key">{formatTimecode(noteMenu.at)}</span>
+          </button>
+        </div>
+      )}
+
+      {/* What a note says, while the pointer is over it. */}
+      {hoverNote && openNote?.id !== hoverNote.id && (
+        <div className="ed-note-tip" ref={noteTipRef} style={{ left: hoverNote.x, top: hoverNote.y }}>
+          {notes.find((note) => note.id === hoverNote.id)?.text.trim() ||
+            "Empty — click to write it."}
+        </div>
+      )}
+
+      {/* And the note itself, open for writing. */}
+      {openNote && notes.some((note) => note.id === openNote.id) && (
+        <div
+          className="ed-note-panel"
+          ref={noteEditorRef}
+          style={{ left: openNote.x, top: openNote.y }}
+        >
+          <div className="ed-note-head">
+            <Icon name="note" />
+            <span>
+              Note at{" "}
+              {formatTimecode(
+                notes.find((note) => note.id === openNote.id)?.atSeconds ?? 0,
+              )}
+            </span>
+          </div>
+          <textarea
+            className="ed-textarea"
+            rows={3}
+            autoFocus
+            placeholder="Cut the cough here…"
+            value={notes.find((note) => note.id === openNote.id)?.text ?? ""}
+            onChange={(e) => {
+              const written = e.currentTarget.value;
+              onUpdateNote(openNote.id, written);
+            }}
+          />
+          <div className="ed-note-foot">
+            <button
+              className="ed-pill"
+              onClick={() => {
+                onRemoveNote(openNote.id);
+                setOpenNote(null);
+                setToast("Note removed.");
+              }}
+            >
+              <Icon name="trash" />
+              <span>Remove</span>
+            </button>
+            <button className="ed-pill ed-pill-primary" onClick={() => setOpenNote(null)}>
+              Done
+            </button>
+          </div>
         </div>
       )}
 

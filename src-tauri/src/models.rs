@@ -68,6 +68,24 @@ pub struct RecordingConfig {
     #[serde(default)]
     pub camera_only: bool,
 
+    /// Whether to write down where the mouse went while recording.
+    ///
+    /// Off unless asked for. What it costs is a reading of the pointer
+    /// sixty times a second and a small file beside the recording; what
+    /// it buys is the editor being able to zoom in on what was clicked
+    /// without anyone having to mark it by hand. Absent in projects and
+    /// bar setups saved before it existed, hence the default.
+    #[serde(default)]
+    pub track_cursor: bool,
+
+    /// Whether to put a ring around the mouse while recording, so it can
+    /// be followed on a busy screen. Drawn on the screen itself, in a
+    /// window of its own, so the capture picks it up like anything else
+    /// that was on screen — there is nothing for the editor or the
+    /// renderer to reproduce afterwards.
+    #[serde(default)]
+    pub highlight_cursor: bool,
+
     pub include_webcam: bool,
     pub webcam_id: Option<String>,
 
@@ -110,6 +128,15 @@ pub struct BarSetup {
     /// Whether the bar should have the user drag out a region first
     /// ("Area" capture) rather than starting on the whole screen.
     pub pick_area: bool,
+    /// Whether the app's own window stays on screen while recording.
+    ///
+    /// Normally it steps out of the way: nobody wants the recorder in
+    /// their recording. But a recording *of* this app — showing the
+    /// editor, demonstrating it, teaching it — needs it to stay exactly
+    /// where it is. Absent in setups saved before the choice existed,
+    /// hence the default.
+    #[serde(default)]
+    pub keep_app_on_screen: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

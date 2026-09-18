@@ -5,6 +5,9 @@ import { IMPORT_FILTERS, PROJECT_EXTENSION } from "./types";
 import type {
   AudioPeaks,
   BarSetup,
+  CaptionSegment,
+  CursorTrack,
+  SpeechEngine,
   ExportFormat,
   ExportPlan,
   DeviceList,
@@ -86,6 +89,35 @@ export const api = {
   writeOverlayImage: (name: string, bytes: number[]) =>
     invoke<string>("write_overlay_image", { name, bytes }),
   exportTimeline: (plan: ExportPlan) => invoke<string>("export_timeline", { plan }),
+  /** Every transcription service, with whether a key has been entered and
+   * which one is marked for use. The keys themselves never come back. */
+  /** Where the mouse went during a recording, if it was followed. Null
+   * for anything this app did not record. */
+  cursorTrack: (path: string) => invoke<CursorTrack | null>("cursor_track", { path }),
+  /** Whether the mouse can be followed on this machine at all. */
+  canTrackCursor: () => invoke<boolean>("can_track_cursor"),
+  speechEngines: () => invoke<SpeechEngine[]>("speech_engines"),
+  /** Puts a key in for one service, or clears it when given nothing.
+   * Answers with the list as it now stands. */
+  saveSpeechKey: (engine: string, key: string) =>
+    invoke<SpeechEngine[]>("save_speech_key", { engine, key }),
+  chooseSpeechEngine: (engine: string) =>
+    invoke<SpeechEngine[]>("choose_speech_engine", { engine }),
+  /** Listens to the given clips and answers with captions. Long-running:
+   * it reports its way through `caption-progress` events. */
+  writeCaptions: (request: {
+    jobs: {
+      clipId: string;
+      path: string;
+      start: number;
+      duration: number;
+      trimStart: number;
+      speed: number;
+    }[];
+    language: string;
+    wordsPerCaption: number;
+    engine: string;
+  }) => invoke<CaptionSegment[]>("write_captions", { request }),
   cancelExport: () => invoke<void>("cancel_export"),
   revealFile: (path: string) => revealItemInDir(path),
 };

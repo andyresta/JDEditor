@@ -55,6 +55,15 @@ import {
   setClipSpeed,
   newId,
   newTrack,
+  newNote,
+  zoomPointsFromClicks,
+  type ProjectNote,
+  captionClips,
+  clipsWorthHearing,
+  CAPTION_TEXT_STYLE,
+  speedOf,
+  type CaptionProgress,
+  type SpeechEngine,
   placeOnTrack,
   removeLayoutAt,
   setLayoutAt,
@@ -174,6 +183,9 @@ function preparePathAsync(
 interface ProjectState {
   media: MediaItem[];
   tracks: TimelineTrack[];
+  /** Notes are part of the document, so undo has to carry them too —
+   * deleting one by mistake should be as recoverable as deleting a clip. */
+  notes: ProjectNote[];
   activeMediaPath: string | null;
   settings: EditorSettings;
 }
@@ -197,6 +209,21 @@ export function RecorderApp() {
   const [includeWebcam, setIncludeWebcam] = useState(false);
   const [webcamId, setWebcamId] = useState<string>("");
   const [includeAudio, setIncludeAudio] = useState(false);
+  /** Whether the recorder writes down where the mouse goes. On by
+   * default for screen recordings: it is what the editor's automatic
+   * zooms are made of, and a recording made without it cannot be given
+   * them afterwards. */
+  const [trackCursor, setTrackCursor] = useState(true);
+  /** Whether a ring follows the mouse on screen while recording. */
+  const [highlightCursor, setHighlightCursor] = useState(true);
+  /** Whether this app stays on screen while recording, for recording the
+   * editor itself. */
+  const [keepAppOnScreen, setKeepAppOnScreen] = useState(false);
+  /** Set when recording was started from inside the editor, so finishing
+   * comes back to the edit rather than to the recorder screen. */
+  const [recordingForProject, setRecordingForProject] = useState(false);
+  /** Whether this machine can follow the mouse at all. */
+  const [canFollowCursor, setCanFollowCursor] = useState(false);
   const [audioId, setAudioId] = useState<string>("");
   const [quality, setQuality] = useState<QualityPreset>("medium");
   const [fps, setFps] = useState<number>(30);
@@ -242,6 +269,17 @@ export function RecorderApp() {
   const [projectMedia, setProjectMedia] = useState<MediaItem[]>([]);
   const [activeMediaPath, setActiveMediaPath] = useState<string | null>(null);
   const [tracks, setTracks] = useState<TimelineTrack[]>(() => [newTrack("Track 1")]);
+  /** Notes pinned along the timeline. Part of the project, never part of
+   * the picture. */
+  const [notes, setNotes] = useState<ProjectNote[]>([]);
+  /** The transcription services and their state, as the app reports them.
+   * Read once on opening and again after every change, so the list the
+   * editor shows is always the app's own answer rather than a guess kept
+   * alongside it. */
+  const [speechEngines, setSpeechEngines] = useState<SpeechEngine[]>([]);
+  /** How far a transcription has got, or null when none is running. */
+  const [captionRun, setCaptionRun] = useState<CaptionProgress | null>(null);
+  const [captionError, setCaptionError] = useState<string | null>(null);
   const [audioPeaks, setAudioPeaks] = useState<PeakMap>(() => new Map());
   /** What is on the clipboard, and which track each piece came from.
    *
@@ -320,10 +358,11 @@ export function RecorderApp() {
     (): ProjectState => ({
       media: projectMedia,
       tracks,
+      notes,
       activeMediaPath,
       settings: editorSettings,
     }),
-    [projectMedia, tracks, activeMediaPath, editorSettings],
+    [projectMedia, tracks, notes, activeMediaPath, editorSettings],
   );
 
   /** Records the document as it is *now*, before the caller changes it.
@@ -355,6 +394,7 @@ export function RecorderApp() {
   const applyState = useCallback((state: ProjectState) => {
     setProjectMedia(state.media);
     setTracks(state.tracks);
+    setNotes(state.notes ?? []);
     setActiveMediaPath(state.activeMediaPath);
     setEditorSettings(state.settings);
     // A step back is still a change against what is on disk.
@@ -417,10 +457,11 @@ export function RecorderApp() {
         relative: toRelativeMediaPath(m.path, savePath),
       })),
       tracks,
+      notes,
       activeMediaPath,
       settings: editorSettings,
     }),
-    [projectMedia, tracks, activeMediaPath, editorSettings],
+    [projectMedia, tracks, notes, activeMediaPath, editorSettings],
   );
 
   /** Writes the project, asking where to put it when it has no file yet
@@ -523,6 +564,7 @@ export function RecorderApp() {
           ),
         ),
       );
+      setNotes(parsed.notes ?? []);
       setSelectedClipIds([]);
       const active = parsed.activeMediaPath;
       setActiveMediaPath(
@@ -576,6 +618,7 @@ export function RecorderApp() {
   const startEmptyProject = useCallback(() => {
     setProjectMedia([]);
     setTracks([newTrack("Track 1")]);
+    setNotes([]);
     setSelectedClipIds([]);
     setActiveMediaPath(null);
     setProjectPath(null);
@@ -669,6 +712,9 @@ export function RecorderApp() {
       const path = event.payload.path;
       setLastOutput(path);
       refreshRecordings();
+      // Either way it lands in the project's media and the editor opens
+      // on it; this only notes that the trip is over.
+      setRecordingForProject(false);
       openInEditor(path);
     });
     return () => {
@@ -728,6 +774,19 @@ export function RecorderApp() {
           area: null,
           window_title: captureMode === "window" ? windowTitle : null,
           camera_only: cameraOnly,
+          // A window is followed wherever it is moved to, so there is no
+          // fixed patch of screen to measure the mouse against; and a
+          // camera recording has no screen in it at all.
+          track_cursor:
+            trackCursor &&
+            canFollowCursor &&
+            !cameraOnly &&
+            captureMode !== "window",
+          highlight_cursor:
+            highlightCursor &&
+            canFollowCursor &&
+            !cameraOnly &&
+            captureMode !== "window",
           // The camera is the picture in camera-only, so it is never also
           // the inset one.
           include_webcam: includeWebcam && !cameraOnly,
@@ -741,6 +800,7 @@ export function RecorderApp() {
         // Area capture drags out a region in the bar first; Display goes
         // straight to being ready to record the whole screen.
         pick_area: captureMode === "area",
+        keep_app_on_screen: keepAppOnScreen,
       });
     } catch (e) {
       setError(String(e));
@@ -812,6 +872,156 @@ export function RecorderApp() {
     }
     setEditorSettings(next);
     setIsDirty(true);
+  }
+
+  async function handleSaveSpeechKey(engine: string, key: string) {
+    try {
+      setSpeechEngines(await api.saveSpeechKey(engine, key));
+      setCaptionError(null);
+    } catch (error) {
+      setCaptionError(String(error));
+    }
+  }
+
+  async function handleChooseSpeechEngine(engine: string) {
+    try {
+      setSpeechEngines(await api.chooseSpeechEngine(engine));
+      setCaptionError(null);
+    } catch (error) {
+      setCaptionError(String(error));
+    }
+  }
+
+  /** Writes captions for everything audible on the timeline.
+   *
+   * The clips are sent one at a time and come back as captions in
+   * timeline time; those become title clips on a track of their own, so
+   * from here on they are ordinary clips — movable, retimeable,
+   * restylable, deletable, and undoable in one step. */
+  async function handleAutoCaption(language: string, wordsPerCaption: number) {
+    setCaptionError(null);
+    const heard = clipsWorthHearing(tracks);
+    if (heard.length === 0) {
+      setCaptionError("There is nothing with sound on the timeline yet.");
+      return;
+    }
+    const missing = heard.filter(
+      (clip) => !projectMedia.some((item) => item.path === clip.mediaPath),
+    );
+    if (missing.length > 0) {
+      setCaptionError("Some clips point at files that aren't in this project any more.");
+      return;
+    }
+
+    setCaptionRun({ stage: "listening", done: 0, total: heard.length, engine: "" });
+    try {
+      const captions = await api.writeCaptions({
+        jobs: heard.map((clip) => ({
+          clipId: clip.id,
+          path: clip.mediaPath,
+          start: clip.startSeconds,
+          duration: clip.durationSeconds,
+          trimStart: clip.trimStartSeconds ?? 0,
+          speed: speedOf(clip),
+        })),
+        language,
+        wordsPerCaption,
+        // Whichever is marked; the app decides, not this end.
+        engine: "",
+      });
+
+      const clips = captionClips(captions, CAPTION_TEXT_STYLE);
+      if (clips.length === 0) {
+        setCaptionError("Nothing was said that could be turned into captions.");
+        return;
+      }
+      remember("captions");
+      setTracks((current) =>
+        withTrackNames([
+          ...current,
+          { ...newTrack("Captions"), clips, named: true, name: "Captions" },
+        ]),
+      );
+      setIsDirty(true);
+    } catch (error) {
+      setCaptionError(String(error));
+    } finally {
+      setCaptionRun(null);
+    }
+  }
+
+  /** Pins a note at a moment. Answers with it, so the editor can open it
+   * for writing straight away — a note nobody is asked to write is a
+   * yellow mark with nothing behind it. */
+  function handleAddNote(atSeconds: number): ProjectNote {
+    const note = newNote(atSeconds);
+    remember("add-note");
+    setNotes((current) => [...current, note]);
+    setIsDirty(true);
+    return note;
+  }
+
+  function handleUpdateNote(id: string, text: string) {
+    remember(`note:${id}`);
+    setNotes((current) =>
+      current.map((note) => (note.id === id ? { ...note, text } : note)),
+    );
+    setIsDirty(true);
+  }
+
+  /** Moves a note to another moment, for when the edit shifts under it. */
+  function handleMoveNote(id: string, atSeconds: number) {
+    remember(`note-at:${id}`);
+    setNotes((current) =>
+      current.map((note) =>
+        note.id === id ? { ...note, atSeconds: Math.max(0, atSeconds) } : note,
+      ),
+    );
+    setIsDirty(true);
+  }
+
+  function handleRemoveNote(id: string) {
+    remember("remove-note");
+    setNotes((current) => current.filter((note) => note.id !== id));
+    setIsDirty(true);
+  }
+
+  /** Makes the zooms a screen recording asks for.
+   *
+   * The recorder wrote down where the mouse went; this turns every click
+   * inside the clip into a zoom towards it. They are ordinary zoom
+   * points afterwards — drag them, retime them, delete the ones that
+   * were not worth it — and one step of undo takes the lot back.
+   *
+   * Answers with how many zooms were made, so the editor can say.
+   */
+  async function handleAutoZoom(clipId: string): Promise<number> {
+    let found: TimelineClip | undefined;
+    for (const track of tracks) {
+      const match = track.clips.find((clip) => clip.id === clipId);
+      if (match) found = match;
+    }
+    if (!found || !found.mediaPath) return 0;
+
+    const trail = await api.cursorTrack(found.mediaPath);
+    if (!trail || trail.samples.length === 0) return -1;
+
+    const points = zoomPointsFromClicks(found, trail);
+    if (points.length === 0) return 0;
+
+    remember(`autozoom:${clipId}`);
+    setTracks((current) =>
+      current.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) =>
+          clip.id === clipId ? { ...clip, layoutPoints: points } : clip,
+        ),
+      })),
+    );
+    setIsDirty(true);
+    // The resting points either side of each zoom are scaffolding; what
+    // was found is the zooms themselves.
+    return points.filter((point) => point.layout.scale > 1.001).length;
   }
 
   function handleAddTrack() {
@@ -1374,7 +1584,14 @@ export function RecorderApp() {
   /** Puts a title on a track at a moment. It has no file behind it — the
    * words are the clip — so `mediaPath` stays empty and everything that
    * looks up media lets it by. */
-  function handleAddTextClip(trackId: string, atSeconds: number) {
+  /** Puts a title on the timeline.
+   *
+   * A null track means the editor found no room on any existing one, and
+   * the title gets a track of its own. It must: a clip put down on a busy
+   * track cuts away whatever it covers, which is right for footage being
+   * moved into place and quite wrong for a title — a title is laid over
+   * the picture, and adding one should never be able to delete a take. */
+  function handleAddTextClip(trackId: string | null, atSeconds: number) {
     remember("add-text");
     const clip: TimelineClip = {
       id: newId("clip"),
@@ -1384,11 +1601,13 @@ export function RecorderApp() {
       text: { ...DEFAULT_TEXT_STYLE },
     };
     setTracks((current) =>
-      current.map((track) =>
-        track.id === trackId
-          ? { ...track, clips: placeOnTrack(track.clips, clip) }
-          : track,
-      ),
+      trackId === null
+        ? withTrackNames([...current, { ...newTrack("Track"), clips: [clip] }])
+        : current.map((track) =>
+            track.id === trackId
+              ? { ...track, clips: placeOnTrack(track.clips, clip) }
+              : track,
+          ),
     );
     setSelectedClipIds([clip.id]);
     setIsDirty(true);
@@ -1470,6 +1689,34 @@ export function RecorderApp() {
         });
     }
   }, [projectMedia]);
+
+  // Whether the mouse can be followed here, asked once: a switch that
+  // could do nothing is not worth offering.
+  useEffect(() => {
+    api
+      .canTrackCursor()
+      .then(setCanFollowCursor)
+      .catch(() => setCanFollowCursor(false));
+  }, []);
+
+  // Which transcription services have keys, asked once on opening.
+  useEffect(() => {
+    api
+      .speechEngines()
+      .then(setSpeechEngines)
+      .catch(() => setSpeechEngines([]));
+  }, []);
+
+  // A transcription says where it has got to as it works through the
+  // clips; an hour of speech is not a thing to do behind a still screen.
+  useEffect(() => {
+    const pending = listen<CaptionProgress>("caption-progress", (event) => {
+      setCaptionRun(event.payload.stage === "done" ? null : event.payload);
+    });
+    return () => {
+      pending.then((unlisten) => unlisten());
+    };
+  }, []);
 
   // ffmpeg reports its position as it goes; this is what moves the bar.
   useEffect(() => {
@@ -1654,6 +1901,24 @@ export function RecorderApp() {
           onRemoveTrack={handleRemoveTrack}
           onRenameTrack={handleRenameTrack}
           onCutAt={handleCutAt}
+          onAutoZoom={handleAutoZoom}
+          onRecord={() => {
+            // Straight to the recorder's own screen, with its devices and
+            // switches; whatever comes back lands in this project.
+            setRecordingForProject(true);
+            setView("recorder");
+          }}
+          notes={notes}
+          onAddNote={handleAddNote}
+          onUpdateNote={handleUpdateNote}
+          onMoveNote={handleMoveNote}
+          onRemoveNote={handleRemoveNote}
+          speechEngines={speechEngines}
+          onSaveSpeechKey={handleSaveSpeechKey}
+          onChooseSpeechEngine={handleChooseSpeechEngine}
+          onAutoCaption={handleAutoCaption}
+          captionRun={captionRun}
+          captionError={captionError}
           onSplitClipAudio={handleSplitClipAudio}
           onSetTransition={handleSetTransition}
           onSetSpeed={handleSetSpeed}
@@ -1775,8 +2040,15 @@ export function RecorderApp() {
       <header className="capture-titlebar">
         <button
           className="capture-icon-button"
-          onClick={() => setView("launcher")}
-          title="Back"
+          // Back to wherever this was reached from. Coming here from the
+          // editor and being dropped at the launcher would leave the edit
+          // behind, which is not what "back" means.
+          onClick={() => {
+            const goingBack = recordingForProject;
+            setRecordingForProject(false);
+            setView(goingBack ? "editor" : "launcher");
+          }}
+          title={recordingForProject ? "Back to the edit" : "Back"}
         >
           ‹
         </button>
@@ -1935,6 +2207,62 @@ export function RecorderApp() {
             disabled={!devices?.audio_inputs.length}
           >
             {includeAudio ? "On" : "Off"}
+          </button>
+        </li>
+
+        <li className="capture-row">
+          <span className="capture-row-icon">🖱</span>
+          <span className="capture-row-empty">
+            {canFollowCursor
+              ? "Follow the mouse (for auto zoom)"
+              : "Following the mouse isn't available here"}
+          </span>
+          <button
+            className={`capture-toggle ${trackCursor && canFollowCursor ? "on" : ""}`}
+            onClick={() => setTrackCursor((on) => !on)}
+            disabled={
+              !canFollowCursor ||
+              captureMode === "camera" ||
+              captureMode === "window"
+            }
+            title={
+              captureMode === "camera"
+                ? "There is no screen in a camera recording to follow the mouse across"
+                : captureMode === "window"
+                  ? "A window is followed wherever it moves, so there is no fixed patch of screen to measure the mouse against"
+                  : "Writes down where the mouse goes, so the editor can zoom in on what was clicked"
+            }
+          >
+            {trackCursor && canFollowCursor ? "On" : "Off"}
+          </button>
+        </li>
+
+        <li className="capture-row">
+          <span className="capture-row-icon">🔆</span>
+          <span className="capture-row-empty">Highlight the mouse</span>
+          <button
+            className={`capture-toggle ${highlightCursor && canFollowCursor ? "on" : ""}`}
+            onClick={() => setHighlightCursor((on) => !on)}
+            disabled={
+              !canFollowCursor ||
+              captureMode === "camera" ||
+              captureMode === "window"
+            }
+            title="Puts a soft ring around the pointer, and a pulse under every click, on the screen while recording"
+          >
+            {highlightCursor && canFollowCursor ? "On" : "Off"}
+          </button>
+        </li>
+
+        <li className="capture-row">
+          <span className="capture-row-icon">🪟</span>
+          <span className="capture-row-empty">Keep JDEditor on screen</span>
+          <button
+            className={`capture-toggle ${keepAppOnScreen ? "on" : ""}`}
+            onClick={() => setKeepAppOnScreen((on) => !on)}
+            title="Normally this app steps out of the way while recording. Turn this on to record the editor itself."
+          >
+            {keepAppOnScreen ? "On" : "Off"}
           </button>
         </li>
 

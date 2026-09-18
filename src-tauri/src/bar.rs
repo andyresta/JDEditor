@@ -57,6 +57,15 @@ fn create_bar_window(app: &tauri::AppHandle, start_hidden: bool) -> Result<(), S
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
+    // Whether this app is being recorded, rather than merely doing the
+    // recording.
+    let keep_on_screen = app
+        .state::<BarState>()
+        .0
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|setup| setup.keep_app_on_screen);
 
     let mut builder =
         WebviewWindowBuilder::new(app, BAR_LABEL, WebviewUrl::App("index.html".into()))
@@ -104,7 +113,15 @@ fn create_bar_window(app: &tauri::AppHandle, start_hidden: bool) -> Result<(), S
         }
     });
 
-    let _ = main.hide();
+    if keep_on_screen {
+        // Left where it is, and left in front: a recording of this app is
+        // a recording of this app, and it cannot be behind the thing
+        // recording it. Focus goes to the bar all the same, so the very
+        // next click is on Record rather than on the editor.
+        let _ = main.set_focus();
+    } else {
+        let _ = main.hide();
+    }
     Ok(())
 }
 

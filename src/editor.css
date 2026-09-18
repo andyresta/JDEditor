@@ -33,6 +33,11 @@
   /* The two hairlines that mark where the finished picture ends. One dark
      against pale footage, one pale against the chequerboard, so whatever
      is playing, one of them is visible. */
+  /* Notes are yellow on purpose: everything else in this editor is
+     green, and a reminder should not read as part of the work. */
+  --ed-note: #f6c445;
+  --ed-note-edge: #c99a12;
+  --ed-note-ink: #3a2c00;
   --ed-frame-ring: rgba(9, 32, 20, 0.88);
   --ed-frame-ring-out: rgba(255, 255, 255, 0.95);
   --ed-frame-lift: 0 10px 28px rgba(6, 40, 22, 0.26);
@@ -78,6 +83,9 @@
     --ed-shadow-md: 0 8px 22px rgba(0, 0, 0, 0.45);
     --ed-checker-a: #141d17;
     --ed-checker-b: #1a241e;
+    --ed-note: #f2c033;
+    --ed-note-edge: #8a6a10;
+    --ed-note-ink: #241b00;
     --ed-frame-ring: rgba(0, 0, 0, 0.9);
     --ed-frame-ring-out: rgba(237, 247, 241, 0.5);
     --ed-frame-lift: 0 12px 32px rgba(0, 0, 0, 0.6);
@@ -795,13 +803,43 @@
 
 .ed-shell .ed-inspector {
   flex: none;
+  /* The width is set from the settings and dragged by the grip on its
+     left edge; these are only what it starts at. */
   width: 300px;
   min-width: 300px;
+  position: relative;
   display: flex;
   flex-direction: column;
   background: var(--ed-surface);
   border-left: 1px solid var(--ed-border);
   overflow: hidden;
+}
+
+/* The edge, widened into something a pointer can actually catch: the
+   border itself is one pixel, which is a poor target. Sits over the
+   panel's own left edge rather than taking room from it. */
+.ed-shell .ed-inspector-grip {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  z-index: 6;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.ed-shell .ed-inspector-grip:hover,
+body.ed-resizing-cols .ed-shell .ed-inspector-grip {
+  background: var(--ed-accent);
+  opacity: 0.55;
+}
+
+/* While a drag is under way the cursor belongs to the drag, wherever it
+   wanders, and nothing else should look selectable. */
+body.ed-resizing-cols {
+  cursor: col-resize;
+  user-select: none;
 }
 
 /* Wraps onto a second row rather than running off the edge. There are six
@@ -1394,8 +1432,49 @@
   top: 45%;
 }
 
+/* The corners: the arriving panel pulled back towards one of them. */
+.ed-shell .ed-transition-art.is-slide-top-left::after {
+  right: 45%;
+  bottom: 45%;
+}
+
+.ed-shell .ed-transition-art.is-slide-top-right::after {
+  left: 45%;
+  bottom: 45%;
+}
+
+.ed-shell .ed-transition-art.is-slide-bottom-left::after {
+  right: 45%;
+  top: 45%;
+}
+
+.ed-shell .ed-transition-art.is-slide-bottom-right::after {
+  left: 45%;
+  top: 45%;
+}
+
 .ed-shell .ed-transition-art.is-zoom::after {
   inset: 26% 30%;
+  border-radius: 3px;
+}
+
+/* Zoom out: caught partway in, so the panel still overruns the frame. */
+.ed-shell .ed-transition-art.is-zoom-out::after {
+  inset: -12% -14%;
+  border-radius: 3px;
+}
+
+/* A pop, drawn at the moment it has just passed its size. */
+.ed-shell .ed-transition-art.is-pop::after {
+  inset: -6% -7%;
+  border-radius: 3px;
+  opacity: 0.9;
+}
+
+/* A grow, caught on the way out from the middle, solid rather than
+   fading. */
+.ed-shell .ed-transition-art.is-grow::after {
+  inset: 16% 19%;
   border-radius: 3px;
 }
 
@@ -1403,6 +1482,96 @@
   margin: 4px 0 0;
   font-size: 11px;
   color: var(--ed-text-faint);
+}
+
+/* --------------------------------------------------------------- notes */
+
+/* A note on the ruler: a small yellow tab at the moment it belongs to.
+   Nothing about it reaches the renderer — it is a pin in the margin. */
+.ed-shell .ed-note-mark {
+  position: absolute;
+  top: 3px;
+  transform: translateX(-50%);
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  border: 1px solid var(--ed-note-edge);
+  background: var(--ed-note);
+  color: var(--ed-note-ink);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  cursor: grab;
+  z-index: 4;
+}
+
+.ed-shell .ed-note-mark .ed-icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* Written but empty: there, and plainly waiting for words. */
+.ed-shell .ed-note-mark.is-blank {
+  border-style: dashed;
+  opacity: 0.8;
+}
+
+.ed-shell .ed-note-mark.is-open {
+  outline: 2px solid var(--ed-accent);
+  outline-offset: 1px;
+}
+
+/* What it says, while the pointer is over it. Never takes the pointer
+   itself, or moving towards it would chase it away. */
+.ed-shell .ed-note-tip {
+  position: fixed;
+  z-index: 50;
+  max-width: 280px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--ed-dark);
+  color: var(--ed-on-dark);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  box-shadow: var(--ed-shadow-md);
+  pointer-events: none;
+}
+
+/* And the note open for writing. */
+.ed-shell .ed-note-panel {
+  position: fixed;
+  z-index: 55;
+  width: 270px;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--ed-surface);
+  border: 1px solid var(--ed-note-edge);
+  box-shadow: var(--ed-shadow-md);
+}
+
+.ed-shell .ed-note-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ed-text-dim);
+}
+
+.ed-shell .ed-note-head .ed-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--ed-note-edge);
+}
+
+.ed-shell .ed-note-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 /* ------------------------------------------------------------ timeline */
@@ -1444,6 +1613,27 @@
 .ed-shell .ed-timeline-inner {
   position: relative;
   padding-bottom: 8px;
+}
+
+/* Behind the track names, over the playhead: the column of names is
+   opaque row by row, and the timeline scrolls underneath it. Without
+   something continuous down the gaps between rows, whatever scrolled
+   behind the column — the playhead, most visibly — showed through them
+   in little dashes. Sticky, so it stays with the names it backs. */
+.ed-shell .ed-timeline-gutter {
+  position: sticky;
+  left: 0;
+  /* Under the ruler, which is sticky at the top and 32px tall. */
+  top: var(--ed-ruler-h);
+  z-index: 4;
+  display: block;
+  float: left;
+  width: var(--ed-side);
+  /* Height is set inline, from the same measurement the playhead's own
+     height comes from, so the two always end together. */
+  margin-bottom: calc(-1 * var(--ed-ruler-h));
+  background: var(--ed-bg);
+  pointer-events: none;
 }
 
 /* ruler row: [ add-track button ][ time ruler ] */
@@ -1521,7 +1711,8 @@
 .ed-shell .ed-tracklabel {
   position: sticky;
   left: 0;
-  z-index: 4;
+  /* Above the strip behind it, which is above the playhead. */
+  z-index: 5;
   flex: none;
   width: var(--ed-side);
   height: var(--ed-row-h);
@@ -2058,15 +2249,15 @@
   cursor: pointer;
 }
 
-.ed-shell .ed-ruler.is-scrubbing,
-.ed-shell .ed-playhead-knob:active {
+.ed-shell .ed-ruler.is-scrubbing {
   cursor: grabbing;
 }
 
 .ed-shell .ed-playhead {
   position: absolute;
   /* Starts under the ruler, which is sticky and paints over everything
-     below it, and at the head of the lanes rather than of the scroller. */
+     below it, and at the head of the lanes rather than of the scroller.
+     The grip that used to hang from here now sits in the ruler itself. */
   top: var(--ed-ruler-h);
   /* Height is set inline from the number of tracks; letting it run to the
      bottom of the scroller drew it straight through the add-track row. */
@@ -2083,29 +2274,42 @@
   will-change: transform;
 }
 
-/* The line itself stays click-through, but the knob is the grab handle
-   for scrubbing, so it has to take pointer events back.
-
-   Centred on the line, exactly: the line is 2px wide and pulled back 1px,
-   so its middle is at 50% of this element and the knob's own half-width
-   takes it back to sit squarely on top. It used to be nudged sideways by a
-   pixel or two, which is what made the playhead look out of true. */
-.ed-shell .ed-playhead-knob {
-  pointer-events: auto;
-  cursor: grab;
+/* The grip at the head of the playhead.
+ *
+ * In the ruler, not on the line. It used to hang from the top of the line
+ * and so came down over the first lane — squarely onto the corner of any
+ * clip that began at the playhead, which is exactly where a clip tends to
+ * begin. Up here it has the ruler to itself and collides with nothing.
+ *
+ * Its own half-width is taken back off, so the middle of the grip is the
+ * moment the line marks, to the pixel. */
+.ed-shell .ed-playhead-head {
   position: absolute;
-  /* Wholly below the ruler: anything above it would be clipped by the
-     sticky ruler's background. */
-  top: 0;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 10px;
-  height: 10px;
-  /* A drop, flat along the top where it meets the ruler and tapering to a
-     point on the line, so the eye can see exactly which pixel is meant. */
-  border-radius: 2px 2px 50% 50%;
+  /* Flush with the foot of the ruler, so the drop and the line it marks
+     are one shape rather than two with a gap between them. */
+  bottom: 0;
+  left: 0;
+  /* Twelve wide and pulled back six: the middle of the grip is then the
+     same pixel as the middle of the two-pixel line. An odd width would
+     leave it half a pixel out, which is exactly the kind of thing that
+     reads as "not quite right" without anyone being able to say why. */
+  margin-left: -6px;
+  width: 12px;
+  height: 11px;
+  /* A drop: flat across the top, tapering to the point where the line
+     picks it up. */
+  border-radius: 3px 3px 50% 50%;
   background: var(--ed-playhead);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  /* The ruler beneath it scrubs on a press, and so does this; taking the
+     pointer back is what lets it be dragged as a grip. */
+  pointer-events: auto;
+  cursor: grab;
+  z-index: 2;
+}
+
+.ed-shell .ed-playhead-head:active {
+  cursor: grabbing;
 }
 
 /* ------------------------------------------------------------ clip menu */
@@ -2367,6 +2571,125 @@
   font-size: 13px;
   line-height: 1.4;
   resize: vertical;
+}
+
+/* ------------------------------------------------------------ captions */
+
+/* The same box as the title's words, so a field is a field wherever it
+   appears in this panel. */
+.ed-shell .ed-input,
+.ed-shell .ed-select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface-2);
+  color: var(--ed-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.ed-shell .ed-select {
+  appearance: none;
+  /* Room for the arrow drawn on the right. */
+  padding-right: 28px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ed-text-dim) 50%),
+    linear-gradient(135deg, var(--ed-text-dim) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 16px, calc(100% - 10px) 16px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.ed-shell .ed-engines {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* One service: what it is, what it is good for, and its own key. */
+.ed-shell .ed-engine {
+  padding: 10px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+}
+
+/* The one that will be used, marked plainly enough to see at a glance
+   which service the bill is going to. */
+.ed-shell .ed-engine.is-default {
+  border-color: var(--ed-accent);
+  background: var(--ed-accent-soft);
+}
+
+.ed-shell .ed-engine-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.ed-shell .ed-engine-head input[type="radio"] {
+  accent-color: var(--ed-accent);
+  flex: none;
+}
+
+.ed-shell .ed-engine-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+}
+
+.ed-shell .ed-engine-state {
+  flex: none;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--ed-surface-3);
+  color: var(--ed-text-faint);
+}
+
+.ed-shell .ed-engine-state.is-set {
+  color: var(--ed-accent-hover);
+}
+
+.ed-shell .ed-engine-note {
+  margin: 6px 0 8px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ed-text-dim);
+}
+
+.ed-shell .ed-engine-key {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ed-shell .ed-engine-key .ed-input {
+  min-width: 0;
+}
+
+/* A plain word rather than a button: where to get a key is a signpost,
+   not an action on the edit. */
+.ed-shell .ed-engine-link {
+  margin-top: 7px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--ed-accent-hover);
+  font: inherit;
+  font-size: 11.5px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.ed-shell .ed-caption-go {
+  width: 100%;
+  margin-top: 12px;
+  justify-content: center;
 }
 
 .ed-shell .ed-textrow {

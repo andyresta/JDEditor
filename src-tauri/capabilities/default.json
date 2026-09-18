@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window, the area-selector overlay and the floating recorder bar",
-  "windows": ["main", "area-selector", "recorder-bar"],
+  "windows": ["main", "area-selector", "recorder-bar", "cursor-halo"],
   "permissions": [
     "core:default",
     "core:window:allow-create",

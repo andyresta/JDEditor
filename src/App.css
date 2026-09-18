@@ -1648,3 +1648,69 @@ html.transparent-window body {
   background: #17a05a;
   transition: width 0.15s linear;
 }
+
+/* ------------------------------------------------------- mouse highlight */
+
+/* The ring that follows the pointer while recording, in a transparent
+   window of its own over whatever is being captured.
+
+   Nothing here takes the pointer — the window itself is click-through —
+   and nothing here is ever drawn by the editor or the renderer: this is
+   on the screen at the time, so the capture picks it up the way it picks
+   up everything else that was on screen. */
+.cursor-halo-window {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: transparent;
+}
+
+.cursor-halo-ring,
+.cursor-halo-pulse {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--halo-size);
+  height: var(--halo-size);
+  border-radius: 50%;
+  /* Moved with a transform so the compositor does the work; anything
+     that costs a layout would show up in the recording as stutter. */
+  will-change: transform;
+  pointer-events: none;
+}
+
+/* Amber and soft: bright enough to find on a white page, dim enough that
+   it never hides what is under the pointer. */
+.cursor-halo-ring {
+  background: radial-gradient(
+    circle,
+    rgba(255, 196, 0, 0.32) 0%,
+    rgba(255, 196, 0, 0.22) 55%,
+    rgba(255, 196, 0, 0) 72%
+  );
+  border: 2px solid rgba(255, 176, 0, 0.55);
+  box-shadow: 0 0 14px rgba(255, 176, 0, 0.35);
+}
+
+/* One press, one pulse. Invisible until a click starts it. */
+.cursor-halo-pulse {
+  opacity: 0;
+  border: 3px solid rgba(255, 158, 0, 0.85);
+}
+
+.cursor-halo-pulse.is-pulsing {
+  animation: cursor-halo-pulse var(--halo-pulse-ms) ease-out 1;
+}
+
+@keyframes cursor-halo-pulse {
+  from {
+    opacity: 0.9;
+    transform-origin: center;
+    scale: 1;
+  }
+  to {
+    opacity: 0;
+    scale: var(--halo-pulse);
+  }
+}

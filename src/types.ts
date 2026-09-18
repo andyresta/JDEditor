@@ -44,6 +44,12 @@ export interface RecordingConfig {
   window_title: string | null;
   /** The camera on its own, with no screen in the recording. */
   camera_only: boolean;
+  /** Put a ring around the mouse while recording, so it can be followed
+   * on a busy screen. Drawn on the screen at the time. */
+  highlight_cursor: boolean;
+  /** Write down where the mouse goes, so the editor can zoom in on what
+   * was clicked. Off unless asked for. */
+  track_cursor: boolean;
   include_webcam: boolean;
   webcam_id: string | null;
   include_audio: boolean;
@@ -56,6 +62,10 @@ export interface RecordingConfig {
 /** What the main window hands to the floating bar when it opens it. */
 export interface BarSetup {
   config: RecordingConfig;
+  /** Whether this app's own window stays on screen while recording,
+   * rather than stepping out of the way — for recording the editor
+   * itself. */
+  keep_app_on_screen?: boolean;
   /** Have the bar drag out a region first, rather than starting on the
    * whole screen. */
   pick_area: boolean;
@@ -189,6 +199,12 @@ export interface EditorSettings {
   category: BackdropCategory;
   swatch: number;
   padding: number;
+  /** How wide the panel on the right is, in pixels. Dragged by its edge
+   * and kept with the project, because how much room the picture gets
+   * against how much the controls get is a working preference, not a
+   * property of the film. Absent in projects saved before it could be
+   * dragged. */
+  inspectorWidth?: number;
   rounded: number;
   timelineZoom: number;
 }
@@ -200,6 +216,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   swatch: 0,
   padding: 36,
   rounded: 14,
+  inspectorWidth: 300,
   timelineZoom: 25,
 };
 
@@ -329,7 +346,14 @@ export const TRANSITIONS = [
   "slide-right",
   "slide-up",
   "slide-down",
+  "slide-top-left",
+  "slide-top-right",
+  "slide-bottom-left",
+  "slide-bottom-right",
   "zoom",
+  "zoom-out",
+  "pop",
+  "grow",
 ] as const;
 export type TransitionKind = (typeof TRANSITIONS)[number];
 
@@ -339,7 +363,14 @@ export const TRANSITION_LABELS: Record<TransitionKind, string> = {
   "slide-right": "Slide from right",
   "slide-up": "Slide from top",
   "slide-down": "Slide from bottom",
+  "slide-top-left": "Slide from top left",
+  "slide-top-right": "Slide from top right",
+  "slide-bottom-left": "Slide from bottom left",
+  "slide-bottom-right": "Slide from bottom right",
   zoom: "Zoom in",
+  "zoom-out": "Zoom out",
+  pop: "Pop",
+  grow: "Grow",
 };
 
 export interface Transition {
@@ -354,6 +385,30 @@ export const MAX_TRANSITION_SECONDS = 3;
 /** How small a zoom transition starts. Small enough to read as arriving,
  * large enough that the picture is never unrecognisable on the way. */
 const ZOOM_TRANSITION_FROM = 0.55;
+
+/** How large a zoom-out starts. Kept modest: a picture that begins at
+ * three times its size arrives showing a ninth of itself, and nobody can
+ * tell what they are looking at until it lands. */
+const ZOOM_OUT_TRANSITION_FROM = 1.55;
+
+/** A pop starts a little under its size and passes a little over it on
+ * the way — the overshoot is the whole character of it. */
+const POP_TRANSITION_FROM = 0.82;
+const POP_OVERSHOOT = 1.7;
+
+/** A grow starts well under its size and simply arrives, without fading:
+ * over the clip it follows it reads as a picture opening out rather than
+ * appearing. */
+const GROW_TRANSITION_FROM = 0.68;
+
+/** Eases past the mark and settles back. The standard "back out" curve:
+ * at the end its slope is negative, which is what makes the picture look
+ * like it has weight. */
+function backOut(t: number): number {
+  const over = POP_OVERSHOOT;
+  const x = t - 1;
+  return 1 + (over + 1) * x * x * x + over * x * x;
+}
 
 /** A transition, trimmed to something the clip can actually hold.
  *
@@ -399,12 +454,49 @@ function transitionShape(
       return { dx: 0, dy: -away, scale: 1, opacity: 1 };
     case "slide-down":
       return { dx: 0, dy: away, scale: 1, opacity: 1 };
+    case "slide-top-left":
+      return { dx: -away, dy: -away, scale: 1, opacity: 1 };
+    case "slide-top-right":
+      return { dx: away, dy: -away, scale: 1, opacity: 1 };
+    case "slide-bottom-left":
+      return { dx: -away, dy: away, scale: 1, opacity: 1 };
+    case "slide-bottom-right":
+      return { dx: away, dy: away, scale: 1, opacity: 1 };
     case "zoom":
       return {
         dx: 0,
         dy: 0,
         scale: ZOOM_TRANSITION_FROM + (1 - ZOOM_TRANSITION_FROM) * eased,
         opacity: progress,
+      };
+    case "zoom-out":
+      return {
+        dx: 0,
+        dy: 0,
+        scale:
+          ZOOM_OUT_TRANSITION_FROM + (1 - ZOOM_OUT_TRANSITION_FROM) * eased,
+        opacity: progress,
+      };
+    case "pop": {
+      // The overshoot is taken from the plain progress rather than from
+      // the smoothed one: easing an ease flattens exactly the kick this
+      // is for.
+      const kick = backOut(Math.max(0, Math.min(1, progress)));
+      return {
+        dx: 0,
+        dy: 0,
+        scale: POP_TRANSITION_FROM + (1 - POP_TRANSITION_FROM) * kick,
+        opacity: progress,
+      };
+    }
+    case "grow":
+      return {
+        dx: 0,
+        dy: 0,
+        scale: GROW_TRANSITION_FROM + (1 - GROW_TRANSITION_FROM) * eased,
+        // No fade: it opens out over the clip before it rather than
+        // appearing out of nothing.
+        opacity: 1,
       };
   }
 }
@@ -416,8 +508,16 @@ export function transitionMoves(kind: TransitionKind): boolean {
   return kind !== "dissolve";
 }
 
+/** Whether a transition fades as well as moves.
+ *
+ * This has to agree exactly with whatever `transitionShape` does to
+ * opacity, because the renderer is told to fade by this and draws the
+ * fade in a straight line. A kind that dims the picture here without
+ * saying so would come out of the render solid. */
 export function transitionFades(kind: TransitionKind): boolean {
-  return kind === "dissolve" || kind === "zoom";
+  return (
+    kind === "dissolve" || kind === "zoom" || kind === "zoom-out" || kind === "pop"
+  );
 }
 
 /** Everything about how a clip is drawn at a moment in its own time: the
@@ -913,37 +1013,6 @@ export function withSpeed(clip: TimelineClip, speed: number): TimelineClip {
   };
 }
 
-/** The clips that were split off this one, or that it was split off from:
- * a video and the sound lifted away from it, which have to be kept the
- * same length as each other. */
-function partnersOf(tracks: TimelineTrack[], clip: TimelineClip): Set<string> {
-  const partners = new Set<string>();
-  for (const track of tracks) {
-    for (const other of track.clips) {
-      if (other.id === clip.id) continue;
-      if (other.sourceClipId === clip.id || clip.sourceClipId === other.id) {
-        partners.add(other.id);
-        continue;
-      }
-      // Projects made before the two were linked by name: the sound that
-      // was lifted off a clip sits at the same moment, for the same
-      // length, pointing at the same file.
-      if (
-        other.sourceClipId == null &&
-        clip.sourceClipId == null &&
-        Boolean(other.soundOnly) !== Boolean(clip.soundOnly) &&
-        other.mediaPath === clip.mediaPath &&
-        Math.abs(other.startSeconds - clip.startSeconds) < 0.002 &&
-        Math.abs(other.durationSeconds - clip.durationSeconds) < 0.002 &&
-        speedOf(other) === speedOf(clip)
-      ) {
-        partners.add(other.id);
-      }
-    }
-  }
-  return partners;
-}
-
 /** Sets a clip's speed and closes up after it.
  *
  * A clip that plays faster is shorter, so what comes after it on the same
@@ -951,9 +1020,11 @@ function partnersOf(tracks: TimelineTrack[], clip: TimelineClip): Set<string> {
  * stretch would leave a hole exactly as long as the time it saved, which
  * is the opposite of the point.
  *
- * Only the tracks that are actually affected move: the clip's own, and
- * that of the sound split off it. A music bed on another track was laid
- * against the whole film and is left where it was put.
+ * Only the clip's own track moves. Nothing else is touched — not even
+ * the sound that was split off this very clip: splitting it made it a
+ * clip in its own right, and a speed given to a picture is given to the
+ * picture. The two can be made to match by giving the sound the same
+ * speed, which is a second deliberate act rather than a silent one.
  */
 export function setClipSpeed(
   tracks: TimelineTrack[],
@@ -970,15 +1041,14 @@ export function setClipSpeed(
   const wanted = Math.min(MAX_SPEED, Math.max(MIN_SPEED, speed));
   if (speedOf(found) === wanted) return tracks;
 
-  const changing = new Set<string>([clipId, ...partnersOf(tracks, found)]);
   const oldEnd = found.startSeconds + found.durationSeconds;
   const delta = withSpeed(found, wanted).durationSeconds - found.durationSeconds;
 
   return tracks.map((track) => {
-    if (!track.clips.some((clip) => changing.has(clip.id))) return track;
+    if (!track.clips.some((clip) => clip.id === clipId)) return track;
     const clips = track.clips
       .map((clip) => {
-        if (changing.has(clip.id)) return withSpeed(clip, wanted);
+        if (clip.id === clipId) return withSpeed(clip, wanted);
         // Everything that began at or after the old end shifts by the
         // difference. A clip that straddles that moment is left alone:
         // moving it would break its own place against the picture.
@@ -1356,6 +1426,9 @@ export interface ProjectFile {
    * clips losing sight of them. Opening tries the relative one first. */
   media: { path: string; name: string; relative?: string }[];
   tracks?: TimelineTrack[];
+  /** Notes left along the timeline. Absent in projects saved before there
+   * were any. */
+  notes?: ProjectNote[];
   activeMediaPath: string | null;
   settings: EditorSettings;
 }
@@ -1567,4 +1640,293 @@ export interface ExportProgress {
   fraction: number;
   seconds_done: number;
   seconds_total: number;
+}
+
+/* --------------------------------------------------------- auto caption */
+
+/** One transcription service, as the app reports it.
+ *
+ * Never carries the key. What the editor is told is only whether a key has
+ * been entered, so a key cannot reach a screenshot or a log by way of the
+ * interface. */
+export interface SpeechEngine {
+  id: string;
+  provider: string;
+  model: string;
+  /** What it is good for, in the words someone choosing would want. */
+  note: string;
+  /** Where its keys are issued. */
+  keysAt: string;
+  hasKey: boolean;
+  isDefault: boolean;
+}
+
+/** One caption the service heard, and where it belongs. */
+export interface CaptionSegment {
+  clipId: string;
+  start: number;
+  duration: number;
+  text: string;
+}
+
+/** How far along a transcription is. */
+export interface CaptionProgress {
+  stage: "listening" | "done";
+  done: number;
+  total: number;
+  engine: string;
+}
+
+/** The languages worth offering by name. Anything else can be had by
+ * letting the service work it out, which every one of them does well. */
+export const CAPTION_LANGUAGES: { code: string; label: string }[] = [
+  { code: "", label: "Detect automatically" },
+  { code: "id", label: "Indonesian" },
+  { code: "en", label: "English" },
+  { code: "ms", label: "Malay" },
+  { code: "ja", label: "Japanese" },
+  { code: "zh", label: "Chinese" },
+  { code: "ar", label: "Arabic" },
+];
+
+/** How many words a caption may hold. Three or four is the short,
+ * fast-changing style; six reads more like a subtitle. */
+export const CAPTION_WORD_COUNTS = [2, 3, 4, 5, 6] as const;
+
+/** What a caption looks like: smaller than a title, and low in the frame
+ * where captions belong. The panel behind the words is what keeps them
+ * readable over a bright screen recording. */
+export const CAPTION_TEXT_STYLE: TextStyle = {
+  content: "",
+  size: 0.055,
+  color: "#ffffff",
+  background: "#000000",
+  bold: true,
+};
+
+/** Where captions sit inside the frame: below the middle, clear of the
+ * bottom edge. A fraction of the frame, like every other layout, so it
+ * means the same thing in the file as on screen. */
+export const CAPTION_LAYOUT: ClipLayout = { x: 0, y: 0.33, scale: 1 };
+
+/** The clips to listen to, in the order they play.
+ *
+ * Exactly what would be heard if the timeline were played: a muted clip is
+ * not transcribed, nor is a title, nor a clip whose sound has been lifted
+ * onto its own track — that track's own clip is the one carrying the sound
+ * now, and it is in this list instead. */
+export function clipsWorthHearing(tracks: TimelineTrack[]): TimelineClip[] {
+  const out: TimelineClip[] = [];
+  for (const track of tracks) {
+    for (const clip of track.clips) {
+      if (isTextClip(clip)) continue;
+      if (clip.muted) continue;
+      if (clip.audioDetached && !clip.soundOnly) continue;
+      out.push(clip);
+    }
+  }
+  return out.sort((a, b) => a.startSeconds - b.startSeconds);
+}
+
+/** Turns what was heard into clips on a track of their own.
+ *
+ * Captions are title clips: the same kind of clip the Text button makes,
+ * which is why they need nothing new from the renderer and can be moved,
+ * retimed, restyled and deleted like anything else on the timeline. */
+export function captionClips(
+  captions: CaptionSegment[],
+  style: TextStyle = CAPTION_TEXT_STYLE,
+): TimelineClip[] {
+  const stamp = Date.now();
+  return captions
+    .filter((caption) => caption.text.trim().length > 0 && caption.duration > 0)
+    .map((caption, index) => ({
+      id: `caption-${stamp}-${index}`,
+      mediaPath: "",
+      startSeconds: toMillis(caption.start),
+      durationSeconds: toMillis(caption.duration),
+      text: { ...style, content: caption.text.trim() },
+      layout: { ...CAPTION_LAYOUT },
+      /** Which clip it was heard in, so a caption can be traced back. */
+      sourceClipId: caption.clipId,
+    }));
+}
+
+/* ---------------------------------------------------------------- notes */
+
+/** A note to whoever is editing, pinned to a moment on the timeline.
+ *
+ * Nothing about the film: it is never drawn into the picture and never
+ * reaches the renderer. It is a pin in the margin — "redo this take",
+ * "cut the cough here", "check the name spelling" — kept with the project
+ * so it is still there tomorrow, and so it travels with the project to
+ * whoever opens it next.
+ */
+export interface ProjectNote {
+  id: string;
+  /** Where on the timeline it is pinned. */
+  atSeconds: number;
+  text: string;
+}
+
+export function newNote(atSeconds: number, text = ""): ProjectNote {
+  return { id: newId("note"), atSeconds: toMillis(Math.max(0, atSeconds)), text };
+}
+
+/** Notes in the order they sit on the timeline. */
+export function notesInOrder(notes: ProjectNote[]): ProjectNote[] {
+  return [...notes].sort((a, b) => a.atSeconds - b.atSeconds);
+}
+
+/* ----------------------------------------------------- following clicks */
+
+/** One reading of the mouse, as the recorder wrote it down. */
+export interface CursorSample {
+  /** Seconds into the recording. */
+  at: number;
+  /** Screen pixels. */
+  x: number;
+  y: number;
+  down: boolean;
+}
+
+/** The trail left beside a recording. `origin` and `size` are the patch of
+ * screen that was captured, so a reading can be turned into a fraction of
+ * the picture whatever was recorded. */
+export interface CursorTrack {
+  version: number;
+  origin: [number, number];
+  size: [number, number];
+  samples: CursorSample[];
+}
+
+/** How close a zoom goes in on what was clicked. */
+export const CLICK_ZOOM = 1.8;
+/** How long before the click the picture starts moving in, and how long
+ * after it starts coming back out. Both are eased by the editor's own
+ * ramp between points, so these are the whole gesture. */
+const ZOOM_IN_SECONDS = 0.45;
+const ZOOM_HOLD_SECONDS = 1.4;
+const ZOOM_OUT_SECONDS = 0.6;
+/** Clicks closer together than this belong to one zoom: a double click,
+ * or a click and the click on what it opened. */
+const SAME_VISIT_SECONDS = 2.2;
+
+/** Where a point of the picture has to be put for the frame to be centred
+ * on it at a given scale.
+ *
+ * A layout's x and y are fractions of the stage from its centre, and the
+ * picture fills the stage at scale 1 — so a point `p` of the picture
+ * (0 to 1 across) sits at `(p − 0.5) · scale` from the centre, and
+ * bringing it *to* the centre means offsetting by the negative of that.
+ * Held inside the frame afterwards: a zoom that shows the backdrop at the
+ * edges is a zoom that has slipped off the picture. */
+export function framingOn(
+  point: { x: number; y: number },
+  scale: number,
+): ClipLayout {
+  const reach = Math.max(0, scale / 2 - 0.5);
+  const put = (at: number) =>
+    Math.max(-reach, Math.min(reach, (0.5 - at) * scale));
+  return { scale, x: put(point.x), y: put(point.y) };
+}
+
+/** The moments a click happened, in recording seconds.
+ *
+ * The button being held down is one click, however many readings it
+ * spans: what matters is where the pointer was when it went down. */
+export function clicksIn(track: CursorTrack): { at: number; x: number; y: number }[] {
+  const clicks: { at: number; x: number; y: number }[] = [];
+  let wasDown = false;
+  for (const sample of track.samples) {
+    if (sample.down && !wasDown) {
+      clicks.push({ at: sample.at, x: sample.x, y: sample.y });
+    }
+    wasDown = sample.down;
+  }
+  return clicks;
+}
+
+/** Turns a recording's clicks into zoom points for one clip.
+ *
+ * The clip carries its own trim and speed, so a click three minutes into
+ * the recording may be ten seconds into the clip, or nowhere in it at
+ * all. Clicks that land outside what the clip actually plays are left
+ * out — they are not in the film.
+ *
+ * Clicks close together share one zoom that travels between them, rather
+ * than the picture darting out and back in; that is the difference
+ * between a zoom that follows the work and one that is seasick.
+ */
+export function zoomPointsFromClicks(
+  clip: TimelineClip,
+  track: CursorTrack,
+  scale: number = CLICK_ZOOM,
+): LayoutPoint[] {
+  const [width, height] = track.size;
+  if (width <= 0 || height <= 0) return [];
+  const speed = speedOf(clip);
+  const trim = clip.trimStartSeconds ?? 0;
+
+  /** Recording time to the clip's own time. */
+  const intoClip = (at: number) => (at - trim) / speed;
+
+  const inside = clicksIn(track)
+    .map((click) => ({
+      at: intoClip(click.at),
+      point: {
+        x: Math.max(0, Math.min(1, (click.x - track.origin[0]) / width)),
+        y: Math.max(0, Math.min(1, (click.y - track.origin[1]) / height)),
+      },
+    }))
+    .filter((click) => click.at >= 0 && click.at <= clip.durationSeconds);
+  if (inside.length === 0) return [];
+
+  // Clicks that belong together, kept as one visit with several stops.
+  const visits: { stops: typeof inside }[] = [];
+  for (const click of inside) {
+    const last = visits[visits.length - 1];
+    const previous = last?.stops[last.stops.length - 1];
+    if (previous && click.at - previous.at <= SAME_VISIT_SECONDS) {
+      last.stops.push(click);
+    } else {
+      visits.push({ stops: [click] });
+    }
+  }
+
+  const resting: ClipLayout = clip.layout ?? FULL_FRAME_LAYOUT;
+  const points: LayoutPoint[] = [];
+  const add = (at: number, layout: ClipLayout) => {
+    const when = toMillis(Math.max(0, Math.min(clip.durationSeconds, at)));
+    // Two points at the same moment would ask the picture to be in two
+    // places at once; the later one is the one that was meant.
+    const already = points.findIndex((p) => Math.abs(p.at - when) < 0.001);
+    if (already >= 0) points[already] = { at: when, layout };
+    else points.push({ at: when, layout });
+  };
+
+  for (const visit of visits) {
+    const first = visit.stops[0];
+    const last = visit.stops[visit.stops.length - 1];
+    add(first.at - ZOOM_IN_SECONDS, resting);
+    for (const stop of visit.stops) {
+      add(stop.at, framingOn(stop.point, scale));
+    }
+    add(last.at + ZOOM_HOLD_SECONDS, framingOn(last.point, scale));
+    add(last.at + ZOOM_HOLD_SECONDS + ZOOM_OUT_SECONDS, resting);
+  }
+
+  // A clip that begins zoomed, because the first click is right at its
+  // start, needs somewhere to have come from.
+  points.sort((a, b) => a.at - b.at);
+  if (points.length > 0 && points[0].at > 0.001) {
+    points.unshift({ at: 0, layout: resting });
+  }
+  // And somewhere to end at, so the last zoom does not hold to the end of
+  // the clip when it was meant to let go.
+  const lastPoint = points[points.length - 1];
+  if (lastPoint && lastPoint.at < clip.durationSeconds - 0.001) {
+    points.push({ at: toMillis(clip.durationSeconds), layout: resting });
+  }
+  return points;
 }

@@ -1,4 +1,7 @@
 mod bar;
+mod caption;
+mod cursor;
+mod halo;
 mod devices;
 mod export;
 mod media;
@@ -224,6 +227,73 @@ async fn audio_peaks(
     blocking(move || waveform::read(&app, &path)).await?
 }
 
+/// Writes captions from what is said in the given clips.
+///
+/// Long-running and on the network, so it runs off the UI thread and says
+/// where it has got to through `caption-progress` events.
+#[tauri::command]
+async fn write_captions(
+    app: tauri::AppHandle,
+    request: caption::CaptionRequest,
+) -> Result<Vec<caption::Caption>, String> {
+    blocking(move || caption::run(&app, request)).await?
+}
+
+/// Where the mouse went during a recording, if it was followed.
+///
+/// None for anything this app did not record, and for recordings made
+/// with the switch off — neither is a failure, only an absence.
+#[tauri::command]
+async fn cursor_track(path: String) -> Result<Option<cursor::CursorTrack>, String> {
+    blocking(move || Ok(cursor::read(std::path::Path::new(&path)))).await?
+}
+
+/// Whether the mouse can be followed on this machine at all, so a switch
+/// that could do nothing is never offered.
+#[tauri::command]
+async fn can_track_cursor() -> Result<bool, String> {
+    blocking(move || Ok(cursor::can_follow())).await?
+}
+
+/// Every transcription service on offer: what it is, whether a key has
+/// been put in for it, and which one is marked for use.
+///
+/// The keys themselves never come back out — what the editor is told is
+/// only that there is one, so a key cannot end up in a log or a
+/// screenshot by way of the interface.
+#[tauri::command]
+async fn speech_engines(app: tauri::AppHandle) -> Result<Vec<caption::EngineInfo>, String> {
+    blocking(move || Ok(caption::engines(&app))).await?
+}
+
+/// Puts a key in for one service, or takes it away again when given
+/// nothing.
+#[tauri::command]
+async fn save_speech_key(
+    app: tauri::AppHandle,
+    engine: String,
+    key: String,
+) -> Result<Vec<caption::EngineInfo>, String> {
+    blocking(move || {
+        caption::save_key(&app, &engine, &key)?;
+        Ok(caption::engines(&app))
+    })
+    .await?
+}
+
+/// Marks one service as the one auto caption uses.
+#[tauri::command]
+async fn choose_speech_engine(
+    app: tauri::AppHandle,
+    engine: String,
+) -> Result<Vec<caption::EngineInfo>, String> {
+    blocking(move || {
+        caption::choose(&app, &engine)?;
+        Ok(caption::engines(&app))
+    })
+    .await?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -263,6 +333,12 @@ pub fn run() {
             write_overlay_image,
             export_timeline,
             cancel_export,
+            cursor_track,
+            can_track_cursor,
+            write_captions,
+            speech_engines,
+            save_speech_key,
+            choose_speech_engine,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

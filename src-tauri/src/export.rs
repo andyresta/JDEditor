@@ -1271,6 +1271,64 @@ args: {}",
 
     /// A zoom that also travels sideways, so the two expressions are
     /// checked against each other rather than only against themselves.
+    /// A picture that begins larger than the frame and settles into it.
+    ///
+    /// Every transition the editor offers is a framing over time, and the
+    /// renderer is told about it as plain scale samples — so the new ones
+    /// need nothing new from this end *provided* a scale above 1 behaves:
+    /// the picture has to overrun the frame and be clipped by it, not be
+    /// letterboxed or refused. "Zoom out" and "Pop" both start there, so
+    /// this is the piece of them that is worth rendering to be sure of.
+    #[test]
+    fn a_picture_larger_than_the_frame_is_clipped_by_it_and_settles() {
+        let (Some(blue), Some(green)) = (
+            colour_source("jd-out-blue.mp4", "blue"),
+            colour_picture("jd-out-backdrop.png", "green", 640, 360),
+        ) else {
+            eprintln!("no ffmpeg to make test sources with; skipping");
+            return;
+        };
+
+        // A stage inset into the frame, so "larger than the stage" and
+        // "larger than the frame" can be told apart by eye.
+        let mut p = padded_plan(&blue, Some(green), 0.0);
+        p.duration = 4.0;
+        p.clips[0].duration = 4.0;
+        p.clips[0].rounded = false;
+        // 1.55 is where a zoom-out starts; it settles at 1, which fills
+        // the stage exactly and leaves the backdrop showing around it.
+        p.clips[0].zoom = vec![
+            PlanZoomPoint { at: 0.0, scale: 1.55, x: 0.0, y: 0.0 },
+            PlanZoomPoint { at: 1.0, scale: 1.0, x: 0.0, y: 0.0 },
+            PlanZoomPoint { at: 4.0, scale: 1.0, x: 0.0, y: 0.0 },
+        ];
+        let out = std::env::temp_dir().join("jd-zoom-out.mp4");
+        p.output_path = out.to_string_lossy().to_string();
+        run_plan(&p);
+
+        // While it is still oversized, the picture reaches past the stage
+        // and covers the corners of the frame.
+        for (x, y, where_) in [(8, 8, "the top left"), (632, 352, "the bottom right")] {
+            assert!(
+                looks_like(pixel_at(&p.output_path, 0.2, x, y), BLUE),
+                "an oversized picture should cover {where_} of the frame"
+            );
+        }
+
+        // Once it has settled it is back inside the stage, and the
+        // backdrop shows around it again.
+        for (x, y, where_) in [(8, 180, "left of the stage"), (632, 180, "right of it")] {
+            assert!(
+                looks_like(pixel_at(&p.output_path, 3.0, x, y), GREEN),
+                "after settling the backdrop should show {where_}"
+            );
+        }
+        assert!(
+            looks_like(pixel_at(&p.output_path, 3.0, 320, 180), BLUE),
+            "the picture itself should still be in the middle"
+        );
+    }
+
     #[test]
     fn a_zoom_can_pan_while_it_grows() {
         let (Some(red), Some(blue)) = (
