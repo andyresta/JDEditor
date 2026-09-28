@@ -57,14 +57,17 @@ import {
   newTrack,
   newNote,
   zoomPointsFromClicks,
+  mediaSpan,
   type ProjectNote,
   captionClips,
   clipsWorthHearing,
   CAPTION_TEXT_STYLE,
   speedOf,
   type CaptionProgress,
+  type LibraryItem,
+  type SavedClip,
   type SpeechEngine,
-  placeOnTrack,
+  settleOnTrack,
   removeLayoutAt,
   setLayoutAt,
   copyOf,
@@ -280,6 +283,14 @@ export function RecorderApp() {
   /** How far a transcription has got, or null when none is running. */
   const [captionRun, setCaptionRun] = useState<CaptionProgress | null>(null);
   const [captionError, setCaptionError] = useState<string | null>(null);
+  /** Whether a key for the sound library has been entered. Never the key
+   * itself: it lives in the app's config folder and only travels one
+   * way. */
+  const [libraryKeySet, setLibraryKeySet] = useState(false);
+  /** The shelf of clips kept across projects. Read from the app rather
+   * than from the project: it belongs to whoever is editing, not to one
+   * edit. */
+  const [savedClips, setSavedClips] = useState<SavedClip[]>([]);
   const [audioPeaks, setAudioPeaks] = useState<PeakMap>(() => new Map());
   /** What is on the clipboard, and which track each piece came from.
    *
@@ -874,6 +885,75 @@ export function RecorderApp() {
     setIsDirty(true);
   }
 
+  /** Puts a piece of the timeline on the shelf.
+   *
+   * What is cut out is exactly what the clip plays: its trim, not the
+   * whole file it came from. Sound split onto its own track saves as
+   * sound; everything else saves as video. */
+  async function handleSaveClip(clipId: string) {
+    let found: TimelineClip | undefined;
+    for (const track of tracks) {
+      const match = track.clips.find((clip) => clip.id === clipId);
+      if (match) found = match;
+    }
+    if (!found || !found.mediaPath) throw new Error("There is nothing in that clip to save.");
+    const item = projectMedia.find((m) => m.path === found!.mediaPath);
+    const sound = Boolean(found.soundOnly) || item?.kind === "audio";
+    const saved = await api.saveClip({
+      path: found.mediaPath,
+      trimStart: found.trimStartSeconds ?? 0,
+      // In the file's own seconds: a clip at double speed covers twice
+      // as much of its file as it takes on the timeline.
+      seconds: mediaSpan(found, found.durationSeconds),
+      name: item?.name ?? "Clip",
+      kind: sound ? "audio" : "video",
+    });
+    setSavedClips((current) => [saved, ...current.filter((clip) => clip.id !== saved.id)]);
+  }
+
+  /** Brings one off the shelf into this project. */
+  async function handleUseClip(clip: SavedClip) {
+    setProjectMedia((current) =>
+      current.some((m) => m.path === clip.path)
+        ? current
+        : [...current, newMediaItem(clip.path, clip.name)],
+    );
+    setIsDirty(true);
+    preparePathAsync(clip.path, setProjectMedia);
+  }
+
+  async function handleDeleteClip(id: string) {
+    try {
+      setSavedClips(await api.deleteClip(id));
+    } catch (error) {
+      setError(String(error));
+    }
+  }
+
+  /** Brings a sound from the library into the project.
+   *
+   * It lands in the app's own library folder and is then imported like
+   * any other file: from that point on the editor knows nothing special
+   * about where it came from. */
+  async function handleAddLibrarySound(item: LibraryItem) {
+    const path = await api.fetchLibrarySound(item);
+    setProjectMedia((current) =>
+      current.some((m) => m.path === path)
+        ? current
+        : [...current, newMediaItem(path, item.name)],
+    );
+    setIsDirty(true);
+    preparePathAsync(path, setProjectMedia);
+  }
+
+  async function handleSaveLibraryKey(key: string) {
+    try {
+      setLibraryKeySet(await api.saveLibraryKey(key));
+    } catch (error) {
+      setError(String(error));
+    }
+  }
+
   async function handleSaveSpeechKey(engine: string, key: string) {
     try {
       setSpeechEngines(await api.saveSpeechKey(engine, key));
@@ -1247,7 +1327,7 @@ export function RecorderApp() {
         const mine = laid.filter((entry) => entry.trackId === track.id);
         if (mine.length === 0) return track;
         let clips = track.clips;
-        for (const entry of mine) clips = placeOnTrack(clips, entry.clip);
+        for (const entry of mine) clips = settleOnTrack(clips, entry.clip);
         return { ...track, clips };
       }),
     );
@@ -1289,7 +1369,7 @@ export function RecorderApp() {
         const mine = laid.filter((entry) => entry.trackId === track.id);
         if (mine.length === 0) return track;
         let clips = track.clips;
-        for (const entry of mine) clips = placeOnTrack(clips, entry.clip);
+        for (const entry of mine) clips = settleOnTrack(clips, entry.clip);
         return { ...track, clips };
       }),
     );
@@ -1436,7 +1516,7 @@ export function RecorderApp() {
     setTracks((current) =>
       current.map((track) =>
         track.id === trackId
-          ? { ...track, clips: placeOnTrack(track.clips, clip) }
+          ? { ...track, clips: settleOnTrack(track.clips, clip) }
           : track,
       ),
     );
@@ -1470,7 +1550,7 @@ export function RecorderApp() {
       return current.map((track) => {
         let clips = track.clips.filter((clip) => !moving.has(clip.id));
         for (const clip of carried.get(track.id) ?? []) {
-          clips = placeOnTrack(clips, clip);
+          clips = settleOnTrack(clips, clip);
         }
         return clips === track.clips ? track : { ...track, clips };
       });
@@ -1491,7 +1571,7 @@ export function RecorderApp() {
         ...track,
         clips:
           track.id === trackId
-            ? placeOnTrack(track.clips, placed)
+            ? settleOnTrack(track.clips, placed)
             : track.clips.filter((c) => c.id !== clipId),
       }));
     });
@@ -1605,7 +1685,7 @@ export function RecorderApp() {
         ? withTrackNames([...current, { ...newTrack("Track"), clips: [clip] }])
         : current.map((track) =>
             track.id === trackId
-              ? { ...track, clips: placeOnTrack(track.clips, clip) }
+              ? { ...track, clips: settleOnTrack(track.clips, clip) }
               : track,
           ),
     );
@@ -1689,6 +1769,22 @@ export function RecorderApp() {
         });
     }
   }, [projectMedia]);
+
+  // What is on the shelf, asked once on opening.
+  useEffect(() => {
+    api
+      .listClips()
+      .then(setSavedClips)
+      .catch(() => setSavedClips([]));
+  }, []);
+
+  // Whether the sound library has a key, asked once on opening.
+  useEffect(() => {
+    api
+      .libraryKeySet()
+      .then(setLibraryKeySet)
+      .catch(() => setLibraryKeySet(false));
+  }, []);
 
   // Whether the mouse can be followed here, asked once: a switch that
   // could do nothing is not worth offering.
@@ -1913,6 +2009,16 @@ export function RecorderApp() {
           onUpdateNote={handleUpdateNote}
           onMoveNote={handleMoveNote}
           onRemoveNote={handleRemoveNote}
+          savedClips={savedClips}
+          onSaveClip={handleSaveClip}
+          onUseClip={handleUseClip}
+          onDeleteClip={handleDeleteClip}
+          onSearchLibrary={(query, includeNonCommercial) =>
+            api.searchLibrary({ query, page: 1, includeNonCommercial })
+          }
+          onAddLibrarySound={handleAddLibrarySound}
+          libraryKeySet={libraryKeySet}
+          onSaveLibraryKey={handleSaveLibraryKey}
           speechEngines={speechEngines}
           onSaveSpeechKey={handleSaveSpeechKey}
           onChooseSpeechEngine={handleChooseSpeechEngine}

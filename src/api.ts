@@ -7,6 +7,9 @@ import type {
   BarSetup,
   CaptionSegment,
   CursorTrack,
+  LibraryItem,
+  LibraryResults,
+  SavedClip,
   SpeechEngine,
   ExportFormat,
   ExportPlan,
@@ -96,6 +99,29 @@ export const api = {
   cursorTrack: (path: string) => invoke<CursorTrack | null>("cursor_track", { path }),
   /** Whether the mouse can be followed on this machine at all. */
   canTrackCursor: () => invoke<boolean>("can_track_cursor"),
+  /** The shelf of clips kept across projects. */
+  listClips: () => invoke<SavedClip[]>("list_clips"),
+  /** Cuts a piece out of a clip and puts it on the shelf. */
+  saveClip: (ask: {
+    path: string;
+    trimStart: number;
+    seconds: number;
+    name: string;
+    kind: "video" | "audio";
+  }) => invoke<SavedClip>("save_clip", { ask }),
+  deleteClip: (id: string) => invoke<SavedClip[]>("delete_clip", { id }),
+  /** Searches the sound library. */
+  searchLibrary: (ask: {
+    query: string;
+    page: number;
+    includeNonCommercial: boolean;
+  }) => invoke<LibraryResults>("search_library", { ask }),
+  /** Fetches one sound into the app's library folder; answers with the
+   * path, which the editor then imports like any other file. */
+  fetchLibrarySound: (item: LibraryItem) =>
+    invoke<string>("fetch_library_sound", { item }),
+  libraryKeySet: () => invoke<boolean>("library_key_set"),
+  saveLibraryKey: (key: string) => invoke<boolean>("save_library_key", { key }),
   speechEngines: () => invoke<SpeechEngine[]>("speech_engines"),
   /** Puts a key in for one service, or clears it when given nothing.
    * Answers with the list as it now stands. */

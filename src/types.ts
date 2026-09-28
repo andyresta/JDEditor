@@ -1149,49 +1149,70 @@ export function trimClip(
  * one answer.
  *
  * Everything it does is one step to undo. */
-export function placeOnTrack(
+/** Where a clip can sit on a track without covering anything.
+ *
+ * Starts from where it was let go of and moves right, past the end of
+ * each clip it would have overlapped, until it lands somewhere free.
+ *
+ * This is the rule for a clip being dragged: nothing it is dropped on
+ * gets shorter, and nothing disappears. Dropping a clip onto another one
+ * used to cut the other one back to make room — which is a fine rule for
+ * a clip being deliberately laid over a gap, and a poor one for a hand
+ * that slipped: the clip underneath had been trimmed to length on
+ * purpose, and getting it back means undoing and doing it all again.
+ *
+ * Right rather than left because the drop point is where the *start* of
+ * the clip was put: pushing it right keeps it after the thing it ran
+ * into, which is where it was heading.
+ */
+export function settleStart(
+  clips: TimelineClip[],
+  incoming: TimelineClip,
+  wanted: number,
+): number {
+  // A thousandth of a second: clips that merely touch do not overlap.
+  const touch = 1e-3;
+  const others = clips
+    .filter((clip) => clip.id !== incoming.id)
+    .sort((a, b) => a.startSeconds - b.startSeconds);
+
+  let at = Math.max(0, wanted);
+  // Pushing past one clip can run it into the next, so this keeps going
+  // until a pass changes nothing. Every pass moves it strictly right and
+  // there are finitely many clips, so it always ends.
+  let settled = false;
+  while (!settled) {
+    settled = true;
+    for (const other of others) {
+      const otherEnd = other.startSeconds + other.durationSeconds;
+      const overlaps =
+        at < otherEnd - touch && at + incoming.durationSeconds > other.startSeconds + touch;
+      if (overlaps) {
+        at = otherEnd;
+        settled = false;
+      }
+    }
+  }
+  return toMillis(at);
+}
+
+/** Puts a clip on a track without shortening anything already there.
+ *
+ * The result is in time order, so "what is playing at this moment" still
+ * has exactly one answer.
+ */
+export function settleOnTrack(
   clips: TimelineClip[],
   incoming: TimelineClip,
 ): TimelineClip[] {
-  const start = incoming.startSeconds;
-  const end = start + incoming.durationSeconds;
-  const kept: TimelineClip[] = [];
-  // A thousandth of a second: clips that merely touch do not overlap.
-  const touch = 1e-3;
-
-  for (const clip of clips) {
-    if (clip.id === incoming.id) continue;
-    const clipStart = clip.startSeconds;
-    const clipEnd = clipStart + clip.durationSeconds;
-
-    if (clipEnd <= start + touch || clipStart >= end - touch) {
-      kept.push(clip);
-      continue;
-    }
-
-    const headCovered = clipStart >= start - touch;
-    const tailCovered = clipEnd <= end + touch;
-    if (headCovered && tailCovered) continue;
-
-    // The head survives only if enough of it is left over, and likewise
-    // the tail. `trimClip` is what carries the volume line along with it.
-    const headLeft = start - clipStart;
-    const tailLeft = clipEnd - end;
-
-    if (!headCovered && headLeft >= MIN_CLIP_SECONDS) {
-      // Trimming inwards never runs out of file, so no length is needed.
-      kept.push(trimClip(clip, "end", start, null));
-    }
-    if (!tailCovered && tailLeft >= MIN_CLIP_SECONDS) {
-      const rest = trimClip(clip, "start", end, null);
-      // A clip split in two needs a second identity, or the halves would
-      // answer to the same selection and the same delete.
-      kept.push(headCovered ? rest : { ...rest, id: newId("clip") });
-    }
-  }
-
-  kept.push(incoming);
-  return kept.sort((a, b) => a.startSeconds - b.startSeconds);
+  const at = settleStart(clips, incoming, incoming.startSeconds);
+  const placed =
+    Math.abs(at - incoming.startSeconds) < 1e-9
+      ? incoming
+      : { ...incoming, startSeconds: at };
+  return [...clips.filter((clip) => clip.id !== incoming.id), placed].sort(
+    (a, b) => a.startSeconds - b.startSeconds,
+  );
 }
 
 /** How far one edge of a clip may be trimmed before it would run into its
@@ -1750,6 +1771,60 @@ export function captionClips(
       /** Which clip it was heard in, so a caption can be traced back. */
       sourceClipId: caption.clipId,
     }));
+}
+
+/* ------------------------------------------------------------ the shelf */
+
+/** One clip kept across projects.
+ *
+ * A real file cut to the piece that was saved, not a reference to the
+ * take it came from: a reference would break the first time a recording
+ * was moved or cleared out. */
+export interface SavedClip {
+  id: string;
+  name: string;
+  /** "video" or "audio". */
+  kind: string;
+  seconds: number;
+  path: string;
+  thumbnailPath?: string | null;
+  savedAt: string;
+}
+
+/* -------------------------------------------------------- sound library */
+
+/** What may be done with a piece of sound from the library.
+ *
+ * Kept as the app reports it rather than worked out here: which licence a
+ * file carries is a fact about the file, and a second opinion about it in
+ * the editor could only ever disagree. */
+export type SoundLicence = "cc0" | "attribution" | "non-commercial" | "unknown";
+
+export const LICENCE_LABELS: Record<SoundLicence, string> = {
+  cc0: "CC0 — no credit needed",
+  attribution: "CC-BY — credit the maker",
+  "non-commercial": "CC-BY-NC — not for paid work",
+  unknown: "Unfamiliar licence",
+};
+
+/** One piece of sound the library offered. Handed straight back to the
+ * app to fetch it, so nothing here may be reshaped on the way. */
+export interface LibraryItem {
+  id: string;
+  name: string;
+  author: string;
+  seconds: number;
+  licence: SoundLicence;
+  licenceUrl: string;
+  previewUrl: string;
+  pageUrl: string;
+}
+
+export interface LibraryResults {
+  items: LibraryItem[];
+  total: number;
+  /** How many were left out for being non-commercial. */
+  hidden: number;
 }
 
 /* ---------------------------------------------------------------- notes */

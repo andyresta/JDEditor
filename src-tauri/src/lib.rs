@@ -1,7 +1,9 @@
 mod bar;
 mod caption;
+mod clips;
 mod cursor;
 mod halo;
+mod library;
 mod devices;
 mod export;
 mod media;
@@ -255,6 +257,63 @@ async fn can_track_cursor() -> Result<bool, String> {
     blocking(move || Ok(cursor::can_follow())).await?
 }
 
+/// The shelf of clips kept across projects.
+#[tauri::command]
+async fn list_clips(app: tauri::AppHandle) -> Result<Vec<clips::SavedClip>, String> {
+    blocking(move || Ok(clips::list(&app))).await?
+}
+
+/// Cuts a piece out of a clip and puts it on that shelf.
+#[tauri::command]
+async fn save_clip(
+    app: tauri::AppHandle,
+    ask: clips::SaveClip,
+) -> Result<clips::SavedClip, String> {
+    blocking(move || clips::save(&app, ask)).await?
+}
+
+#[tauri::command]
+async fn delete_clip(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<Vec<clips::SavedClip>, String> {
+    blocking(move || clips::remove(&app, &id)).await?
+}
+
+/// Searches the sound library.
+#[tauri::command]
+async fn search_library(
+    app: tauri::AppHandle,
+    ask: library::LibrarySearch,
+) -> Result<library::LibraryResults, String> {
+    blocking(move || library::search(&app, ask)).await?
+}
+
+/// Fetches one piece of sound into the app's library folder and answers
+/// with where it landed, so the editor can import it like any other file.
+#[tauri::command]
+async fn fetch_library_sound(
+    app: tauri::AppHandle,
+    item: library::LibraryItem,
+) -> Result<String, String> {
+    blocking(move || library::fetch(&app, item)).await?
+}
+
+/// Whether a key for the sound library has been put in — never the key.
+#[tauri::command]
+async fn library_key_set(app: tauri::AppHandle) -> Result<bool, String> {
+    blocking(move || Ok(library::has_key(&app))).await?
+}
+
+#[tauri::command]
+async fn save_library_key(app: tauri::AppHandle, key: String) -> Result<bool, String> {
+    blocking(move || {
+        library::save_key(&app, &key)?;
+        Ok(library::has_key(&app))
+    })
+    .await?
+}
+
 /// Every transcription service on offer: what it is, whether a key has
 /// been put in for it, and which one is marked for use.
 ///
@@ -333,6 +392,13 @@ pub fn run() {
             write_overlay_image,
             export_timeline,
             cancel_export,
+            list_clips,
+            save_clip,
+            delete_clip,
+            search_library,
+            fetch_library_sound,
+            library_key_set,
+            save_library_key,
             cursor_track,
             can_track_cursor,
             write_captions,

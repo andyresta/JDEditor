@@ -376,8 +376,7 @@
   min-width: 0;
 }
 
-.ed-shell .ed-stage-toolbar-left,
-.ed-shell .ed-stage-toolbar-right {
+.ed-shell .ed-stage-toolbar-left {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1045,6 +1044,16 @@ body.ed-resizing-cols {
   white-space: nowrap;
 }
 
+/* Centred down the row.
+   
+   The row stretches what is in it, and stretching only applies to a child
+   whose height is its own business; this one is 28px by 28px, so it was
+   left sitting at the top while everything beside it filled the height. */
+.ed-shell .ed-mediarow .ed-sound-play {
+  align-self: center;
+  margin-right: 4px;
+}
+
 .ed-shell .ed-mediarow-remove {
   flex: none;
   width: 28px;
@@ -1344,11 +1353,22 @@ body.ed-resizing-cols {
   box-shadow: inset 0 0 0 1px var(--ed-accent);
 }
 
+/* Three across rather than two: there are thirteen of these now, and two
+   columns made a list long enough that the last of them were a scroll
+   away from the first. */
 .ed-shell .ed-transitions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
   margin: 14px 0 12px;
+}
+
+/* Narrower tiles, so the name under each still fits without breaking
+   across two lines at three to a row. */
+.ed-shell .ed-transitions .ed-transition {
+  padding: 6px;
+  font-size: 10.5px;
+  line-height: 1.25;
 }
 
 .ed-shell .ed-transition {
@@ -1484,6 +1504,261 @@ body.ed-resizing-cols {
   color: var(--ed-text-faint);
 }
 
+/* The count beside a media sub-tab: how many videos, pictures, sounds. */
+.ed-shell .ed-segment-count {
+  margin-left: 5px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--ed-surface-3);
+  color: var(--ed-text-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.ed-shell .ed-segment.is-active .ed-segment-count {
+  background: var(--ed-accent-soft);
+  color: var(--ed-accent-hover);
+}
+
+/* The way in for whichever kind of media is being shown. Full width and
+   right under the three, so it plainly belongs to the one that is
+   open. */
+.ed-shell .ed-import {
+  width: 100%;
+  justify-content: center;
+  margin: 10px 0 4px;
+}
+
+/* ------------------------------------------------------------ the player */
+
+/* A file played on its own, away from the preview. Wider than the other
+   dialogues, because what it holds is a picture rather than a control. */
+/* Both classes named, so this beats `.ed-modal`'s own narrow width
+   whichever of the two is written later in this file. A dialogue asking
+   one question wants to be small; a window for watching does not. */
+.ed-shell .ed-modal.ed-player {
+  max-width: min(1180px, 94vw);
+  width: 100%;
+}
+
+.ed-shell .ed-player-piece {
+  display: block;
+  width: 100%;
+  max-height: 74vh;
+  border-radius: 10px;
+  background: #000000;
+}
+
+/* Sound has nothing to show, so it is given something: the glyph, and a
+   bar under it. */
+.ed-shell .ed-player-sound {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 22px 10px 6px;
+  border-radius: 10px;
+  background: var(--ed-surface-2);
+}
+
+.ed-shell .ed-player-sound .ed-player-piece {
+  background: transparent;
+  max-height: none;
+}
+
+/* ------------------------------------------------------------ the shelf */
+
+/* One clip kept across projects: a frame from it, what it is, and the two
+   things that can be done with it. */
+.ed-shell .ed-shelfclip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 7px;
+  border-radius: 9px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+}
+
+.ed-shell .ed-shelfclip-shot {
+  flex: none;
+  width: 52px;
+  height: 30px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--ed-surface-3);
+}
+
+/* Sound has no frame to show, so it says so instead. */
+.ed-shell .ed-shelfclip-shot.is-sound {
+  display: grid;
+  place-items: center;
+  color: var(--ed-audio);
+}
+
+.ed-shell .ed-shelfclip-what {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* ------------------------------------------------------- sound library */
+
+.ed-shell .ed-library {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 10px;
+}
+
+/* One sound: hear it, read what it is, take it. */
+.ed-shell .ed-sound {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+  border-radius: 9px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+}
+
+.ed-shell .ed-sound-play {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--ed-border-strong);
+  background: var(--ed-surface-2);
+  color: var(--ed-text);
+  cursor: pointer;
+}
+
+.ed-shell .ed-sound-play:hover {
+  border-color: var(--ed-accent);
+  color: var(--ed-accent-hover);
+}
+
+.ed-shell .ed-sound-what {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ed-shell .ed-sound-name {
+  font-size: 12.5px;
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ed-shell .ed-sound-by {
+  font-size: 11px;
+  color: var(--ed-text-dim);
+}
+
+/* What the licence allows, said in colour as well as in words: a credit
+   that has to be given is not a detail to be skimmed past. */
+.ed-shell .ed-sound-licence {
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.ed-shell .ed-sound-licence.is-cc0 {
+  color: var(--ed-accent-hover);
+}
+
+.ed-shell .ed-sound-licence.is-attribution {
+  color: var(--ed-note-edge);
+}
+
+.ed-shell .ed-sound-licence.is-non-commercial,
+.ed-shell .ed-sound-licence.is-unknown {
+  color: var(--ed-playhead);
+}
+
+.ed-shell .ed-library-filter {
+  margin: 8px 0 4px;
+  cursor: pointer;
+}
+
+.ed-shell .ed-library-filter input[type="checkbox"] {
+  accent-color: var(--ed-accent);
+}
+
+/* ---------------------------------------------------------- a dialogue */
+
+/* Raised over the editor for one decision at a time. The ground behind it
+   is dimmed rather than hidden: what is being changed should still be
+   visible while it changes. */
+.ed-shell .ed-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(6, 16, 11, 0.45);
+}
+
+.ed-shell .ed-modal {
+  width: 100%;
+  max-width: 380px;
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 16px 16px 14px;
+  border-radius: 14px;
+  background: var(--ed-surface);
+  border: 1px solid var(--ed-border);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+}
+
+.ed-shell .ed-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.ed-shell .ed-modal-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.ed-shell .ed-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* The typed speed, with its × sitting inside the field's own frame. */
+.ed-shell .ed-speed-typed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ed-shell .ed-speed-typed .ed-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ed-shell .ed-speed-x {
+  flex: none;
+  font-size: 13px;
+  color: var(--ed-text-dim);
+}
+
 /* --------------------------------------------------------------- notes */
 
 /* A note on the ruler: a small yellow tab at the moment it belongs to.
@@ -1607,33 +1882,13 @@ body.ed-resizing-cols {
   overflow: auto;
 }
 
-/* Deliberately no `min-width: 100%`: zoomed out the timeline is meant to
-   be narrower than the pane it sits in. The width comes from the
-   component: the name column plus the zoomed track width. */
+/* No `min-width: 100%` here either: the width comes from the component,
+   which draws the lanes at least as wide as the pane whatever the zoom.
+   Doing it in CSS instead would stretch this box without telling the
+   lanes inside it, and they are what has to reach the edge. */
 .ed-shell .ed-timeline-inner {
   position: relative;
   padding-bottom: 8px;
-}
-
-/* Behind the track names, over the playhead: the column of names is
-   opaque row by row, and the timeline scrolls underneath it. Without
-   something continuous down the gaps between rows, whatever scrolled
-   behind the column — the playhead, most visibly — showed through them
-   in little dashes. Sticky, so it stays with the names it backs. */
-.ed-shell .ed-timeline-gutter {
-  position: sticky;
-  left: 0;
-  /* Under the ruler, which is sticky at the top and 32px tall. */
-  top: var(--ed-ruler-h);
-  z-index: 4;
-  display: block;
-  float: left;
-  width: var(--ed-side);
-  /* Height is set inline, from the same measurement the playhead's own
-     height comes from, so the two always end together. */
-  margin-bottom: calc(-1 * var(--ed-ruler-h));
-  background: var(--ed-bg);
-  pointer-events: none;
 }
 
 /* ruler row: [ add-track button ][ time ruler ] */
@@ -1711,7 +1966,6 @@ body.ed-resizing-cols {
 .ed-shell .ed-tracklabel {
   position: sticky;
   left: 0;
-  /* Above the strip behind it, which is above the playhead. */
   z-index: 5;
   flex: none;
   width: var(--ed-side);
@@ -1732,6 +1986,31 @@ body.ed-resizing-cols {
    of them ends however tall each has been dragged. */
 .ed-shell .ed-tracks {
   position: relative;
+}
+
+/* The gap above each row, filled in.
+ *
+ * Rows are spaced by a margin, and the name column — opaque, sticky, and
+ * covering whatever scrolls behind it — covers only the height of its own
+ * row. The playhead sliding behind the column therefore showed through
+ * the gaps as a row of short red dashes. This carries each name's own
+ * background up through the gap above it.
+ *
+ * A pseudo-element on the name rather than a strip of its own: a strip in
+ * the flow would have to be floated or positioned to sit there, and a
+ * float moves everything after it — which is exactly the bug this
+ * replaces, where the whole timeline shifted sideways by the width of
+ * this column and left the playhead's line behind. */
+.ed-shell .ed-tracklabel::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  /* The same 6px the rows are spaced by. */
+  top: -6px;
+  height: 6px;
+  background: var(--ed-bg);
+  pointer-events: none;
 }
 
 /* Taller or shorter, one track at a time: the chevron jumps between two
@@ -2255,13 +2534,16 @@ body.ed-resizing-cols {
 
 .ed-shell .ed-playhead {
   position: absolute;
-  /* Starts under the ruler, which is sticky and paints over everything
-     below it, and at the head of the lanes rather than of the scroller.
-     The grip that used to hang from here now sits in the ruler itself. */
-  top: var(--ed-ruler-h);
-  /* Height is set inline from the number of tracks; letting it run to the
-     bottom of the scroller drew it straight through the add-track row. */
-  bottom: auto;
+  /* Top to bottom of the block of rows, which is what it belongs to: it
+     is a child of that block, so it ends where the last row ends and
+     never runs on through the add-track row below.
+
+     It used to be given a height in pixels measured from those rows,
+     which meant a measurement taken while the window was hidden left the
+     line zero pixels tall and invisible. Stretching cannot be measured
+     wrong. */
+  top: 0;
+  bottom: 0;
   left: var(--ed-side);
   width: 2px;
   margin-left: -1px;

@@ -26,7 +26,6 @@ import { MenuBar, type MenuDef } from "./MenuBar";
 import {
   BACKDROP_CATEGORIES,
   BACKDROP_KINDS,
-  FULL_FRAME_LAYOUT,
   MAX_ZOOM,
   clipBefore,
   DEFAULT_TRANSITION_SECONDS,
@@ -37,6 +36,10 @@ import {
   FRAME_SHAPE_LABELS,
   shapeRatio,
   CAPTION_LANGUAGES,
+  type SavedClip,
+  LICENCE_LABELS,
+  type LibraryItem,
+  type LibraryResults,
   notesInOrder,
   type ProjectNote,
   CAPTION_WORD_COUNTS,
@@ -177,6 +180,18 @@ interface EditorShellProps {
   /** How far a transcription has got, or null when none is running. */
   captionRun: CaptionProgress | null;
   captionError: string | null;
+  /** The shelf of clips kept across projects, and what may be done with
+   * it: put one on, take one into this project, take one off. */
+  savedClips: SavedClip[];
+  onSaveClip: (clipId: string) => Promise<void>;
+  onUseClip: (clip: SavedClip) => Promise<void>;
+  onDeleteClip: (id: string) => void;
+  /** Searches the sound library, and brings one into the project. */
+  onSearchLibrary: (query: string, includeNonCommercial: boolean) => Promise<LibraryResults>;
+  onAddLibrarySound: (item: LibraryItem) => Promise<void>;
+  /** Whether a key for the library has been entered — never the key. */
+  libraryKeySet: boolean;
+  onSaveLibraryKey: (key: string) => void;
   /** Notes pinned along the timeline: reminders for whoever is editing,
    * never part of the picture. */
   notes: ProjectNote[];
@@ -674,20 +689,20 @@ function kindLabel(kind: MediaKind): string {
 
 type SidebarTab =
   | "media"
-  | "audio"
-  | "text"
-  | "captions"
+  | "library"
+  | "art"
   | "transitions"
-  | "speed"
   | "background";
+
+/** What the Art & Text panel is showing. Words written by hand, words
+ * written from what was said, and — in time — pictures. */
+type ArtKind = "text" | "caption" | "art";
 
 const SIDEBAR_TABS: { id: SidebarTab; label: string }[] = [
   { id: "media", label: "Media" },
-  { id: "audio", label: "Audio" },
-  { id: "text", label: "Text" },
-  { id: "captions", label: "Captions" },
+  { id: "library", label: "Library" },
+  { id: "art", label: "Art & Text" },
   { id: "transitions", label: "Transitions" },
-  { id: "speed", label: "Speed" },
   { id: "background", label: "Background" },
 ];
 
@@ -790,6 +805,7 @@ function MediaRow({
   item,
   isActive,
   onSelect,
+  onPlay,
   onRemove,
   onRelink,
   onDragStart,
@@ -798,6 +814,9 @@ function MediaRow({
   item: MediaItem;
   isActive: boolean;
   onSelect: () => void;
+  /** Opens it in the player, which is a window of its own: the preview
+   * belongs to the timeline. */
+  onPlay: () => void;
   onRemove: () => void;
   onRelink: () => void;
   onDragStart: (e: DragEvent<HTMLElement>) => void;
@@ -843,6 +862,15 @@ function MediaRow({
           </span>
         </span>
       </button>
+      {!missing && item.status !== "preparing" && (
+        <button
+          className="ed-sound-play"
+          title={`Play ${item.name}`}
+          onClick={onPlay}
+        >
+          <Icon name="play" />
+        </button>
+      )}
       {missing && (
         <button
           className="ed-mediarow-find"
@@ -922,6 +950,14 @@ export function EditorShell({
   onAutoCaption,
   captionRun,
   captionError,
+  savedClips,
+  onSaveClip,
+  onUseClip,
+  onDeleteClip,
+  onSearchLibrary,
+  onAddLibrarySound,
+  libraryKeySet,
+  onSaveLibraryKey,
   notes,
   onAddNote,
   onUpdateNote,
@@ -935,6 +971,46 @@ export function EditorShell({
   const [showInspector, setShowInspector] = useState(true);
   const [showTimeline, setShowTimeline] = useState(true);
   const [activeTab, setActiveTab] = useState<SidebarTab>("media");
+  /** The clips whose speed is being set, or null when the box is shut.
+   * Held as ids rather than as clips: the clips themselves are replaced
+   * on every change, and a box holding the old ones would set the speed
+   * of something that no longer exists. */
+  const [speedFor, setSpeedFor] = useState<string[] | null>(null);
+  /** What is in the box's own number field while it is being typed in.
+   * Null while nobody is typing, so the field follows the clip. */
+  const [typedSpeed, setTypedSpeed] = useState<string | null>(null);
+  /** The sound library: what was asked for, what came back, and what is
+   * playing. Nothing here is kept in the project — it is a shop window,
+   * not part of the edit. */
+  const [librarySearch, setLibrarySearch] = useState("");
+  const [libraryResults, setLibraryResults] = useState<LibraryResults | null>(null);
+  const [libraryBusy, setLibraryBusy] = useState(false);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [libraryPaid, setLibraryPaid] = useState(true);
+  const [libraryPlaying, setLibraryPlaying] = useState<string | null>(null);
+  const [libraryAdding, setLibraryAdding] = useState<string | null>(null);
+  const [libraryTypedKey, setLibraryTypedKey] = useState("");
+  const libraryAudio = useRef<HTMLAudioElement | null>(null);
+  /** Which of the project's media the Media panel is showing. */
+  const [mediaKind, setMediaKind] = useState<"video" | "image" | "audio" | "clip">(
+    "video",
+  );
+  /** Which part of Art & Text is open. */
+  const [artKind, setArtKind] = useState<ArtKind>("text");
+  /** Which shelved clip is being fetched into the project, so its row can
+   * say so rather than appearing to do nothing. */
+  const [usingClip, setUsingClip] = useState<string | null>(null);
+  /** The file open in the player, or null when it is shut.
+   *
+   * A window of its own, away from the preview. The preview is the edit —
+   * what the timeline holds at the playhead — and a file from the Media
+   * panel appearing there was the whole confusion: the same window meant
+   * two different things depending on what had last been pressed. */
+  const [playing, setPlaying] = useState<{
+    path: string;
+    name: string;
+    kind: "video" | "image" | "audio";
+  } | null>(null);
   /** What is typed into each service's key box before it is saved. Held
    * here and nowhere else: a saved key goes straight to the app's config
    * folder and never comes back, so this is only ever what is on screen
@@ -1102,7 +1178,6 @@ export function EditorShell({
   const [clockEpoch, setClockEpoch] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [videoDuration, setVideoDuration] = useState(0);
   /** Written to directly while playing — see the animation-frame effect. */
   const timecodeRef = useRef<HTMLSpanElement | null>(null);
   const playheadRef = useRef<HTMLDivElement | null>(null);
@@ -1116,11 +1191,9 @@ export function EditorShell({
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const backdropRef = useRef<HTMLCanvasElement | null>(null);
   const [previewArea, setPreviewArea] = useState({ width: 0, height: 0 });
-  /** The block of track rows. Measured rather than worked out from a row
-   * height, because rows can each be dragged to their own height — the
-   * playhead has to stop exactly at the last of them either way. */
+  /** The block of track rows. The playhead lives inside it and stretches
+   * to it, so nothing here has to be measured in pixels. */
   const tracksRef = useRef<HTMLDivElement | null>(null);
-  const [tracksHeight, setTracksHeight] = useState(0);
   /** The stage's size in pixels. A title is measured against the frame's
    * height, so it has to be known before one can be drawn. */
   const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
@@ -1182,10 +1255,6 @@ export function EditorShell({
     const t = window.setTimeout(() => setToast(null), 2200);
     return () => window.clearTimeout(t);
   }, [toast]);
-
-  const comingSoon = useCallback((feature: string) => {
-    setToast(`${feature} is coming in a future update.`);
-  }, []);
 
   // The menus advertise these keys, so they have to actually work.
   useEffect(() => {
@@ -1363,8 +1432,11 @@ export function EditorShell({
   /** Files the project remembers but cannot find. Said out loud rather
    * than left to be discovered as a clip that plays nothing. */
   const missingMedia = media.filter((item) => item.status === "missing");
-  const visualMedia = media.filter((m) => m.kind !== "audio");
   const audioMedia = media.filter((m) => m.kind === "audio");
+  const videoMedia = media.filter((m) => m.kind === "video");
+  const imageMedia = media.filter((m) => m.kind === "image");
+  const shownMedia =
+    mediaKind === "video" ? videoMedia : mediaKind === "image" ? imageMedia : audioMedia;
 
   /** The timeline is as long as what has been laid out on it — the end of
    * the furthest clip on any track — and falls back to a fixed span while
@@ -1514,32 +1586,14 @@ export function EditorShell({
     return layers;
   }, [tracks, currentTime, timelineHasClips, mediaByPath]);
 
-  /** What the stage actually shows. With nothing laid out yet the sidebar
-   * selection stands in as a single layer, so imported media can still be
-   * looked at before it is placed — but it isn't part of the edit, so it
-   * can't be moved around the frame. */
-  const previewLayers = useMemo<Layer[]>(() => {
-    if (timelineHasClips) return activeLayers;
-    if (!selectedMedia) return [];
-    return [
-      {
-        clip: {
-          id: `preview:${selectedMedia.path}`,
-          mediaPath: selectedMedia.path,
-          startSeconds: 0,
-          durationSeconds: selectedMedia.durationSeconds ?? DEFAULT_CLIP_SECONDS,
-        },
-        item: selectedMedia,
-        depth: 0,
-        layout: FULL_FRAME_LAYOUT,
-        opacity: 1,
-        holding: false,
-        warming: false,
-        movable: false,
-        audioOnly: selectedMedia.kind === "audio",
-      },
-    ];
-  }, [timelineHasClips, activeLayers, selectedMedia]);
+  /** What the stage shows: the timeline at the playhead, and nothing
+   * else.
+   *
+   * It used to stand a piece of unplaced media in when the timeline was
+   * empty, which meant the preview was sometimes the edit and sometimes a
+   * file from the sidebar, with nothing to say which. Media is looked at
+   * in a player of its own now; this window is the edit. */
+  const previewLayers = activeLayers;
 
   /** Audio plays but has nothing to draw, so it is kept out of the stack
    * and mounted on its own. */
@@ -1578,21 +1632,12 @@ export function EditorShell({
     return [...marks].sort((a, b) => a - b);
   }, [tracks]);
 
-  const totalSeconds = timelineHasClips
-    ? timelineSeconds
-    : videoDuration > 0
-      ? videoDuration
-      : typeof selectedMedia?.durationSeconds === "number" &&
-          selectedMedia.durationSeconds > 0
-        ? selectedMedia.durationSeconds
-        : 0;
+  /** How long the film is. The timeline's length, because the timeline
+   * is what plays here. */
+  const totalSeconds = timelineHasClips ? timelineSeconds : 0;
 
   /** Whether the transport has anything to drive. */
-  const canPlay = timelineHasClips
-    ? timelineSeconds > 0
-    : selectedMedia != null &&
-      selectedMedia.status === "ready" &&
-      selectedMedia.kind === "video";
+  const canPlay = timelineHasClips && timelineSeconds > 0;
 
   /** Puts every mounted layer at a moment of timeline time. `tolerance` is
    * how far out of step a layer has to be before it is worth seeking: a
@@ -1718,11 +1763,6 @@ export function EditorShell({
     }
   }, [isPlaying, previewLayers]);
 
-  // Starting a fresh preview source resets the readings.
-  useEffect(() => {
-    setVideoDuration(0);
-  }, [selectedMedia?.path]);
-
   // How wide the timeline can actually be seen, which is what the zoom
   // range is measured against. The track-name column is inside the same
   // scroller, so it is discounted here.
@@ -1807,15 +1847,6 @@ export function EditorShell({
     drawBackdrop(ctx, { backdropKind, category, swatch }, width, height);
   }, [geometry.width, geometry.height, backdropKind, category, swatch]);
 
-  useEffect(() => {
-    const element = tracksRef.current;
-    if (!element) return;
-    setTracksHeight(element.offsetHeight);
-    const observer = new ResizeObserver(() => setTracksHeight(element.offsetHeight));
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [showTimeline]);
-
   // Zoomed all the way out, the whole clip spans half the visible width;
   // every 25 points on the slider doubles that, so 25 is "fits exactly".
   const minTrackWidth = Math.max(200, Math.round(viewportWidth / 2));
@@ -1823,6 +1854,21 @@ export function EditorShell({
 
   /** The one scale every clip, tick and drop position is measured with. */
   const pixelsPerSecond = timelineSeconds > 0 ? trackWidth / timelineSeconds : 0;
+
+  /** How wide the lanes and the ruler are *drawn*, as against how wide the
+   * film is.
+   *
+   * Zooming out shrinks the film, not the timeline: the rows carry on to
+   * the edge of the pane with nothing in them, the way ruled paper does
+   * not stop at the last word. They used to end wherever the last clip
+   * ended, which left the panel half painted and made it look as though
+   * the track itself had been cut short.
+   *
+   * Only the drawing uses this. Every measurement — where a clip sits,
+   * where a tick goes, what second the pointer is over — still goes
+   * through `trackWidth`, so the empty part is empty rather than a
+   * stretched version of the film. */
+  const laneWidth = Math.max(trackWidth, viewportWidth);
 
   const timeToPixels = useCallback(
     (seconds: number) =>
@@ -2323,7 +2369,8 @@ export function EditorShell({
     onAddTextClip(trackId, at);
     if (!trackId) setToast("Title added on a new track.");
     scrubTo(at);
-    setActiveTab("text");
+    setActiveTab("art");
+    setArtKind("text");
   }
 
   /** Presses on a note: a press and release opens it, a press and drag
@@ -2393,6 +2440,45 @@ export function EditorShell({
     document.body.classList.add("ed-resizing-cols");
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+  }
+
+  /** Asks the library. */
+  async function runLibrarySearch() {
+    if (librarySearch.trim().length === 0) return;
+    setLibraryBusy(true);
+    setLibraryError(null);
+    try {
+      setLibraryResults(await onSearchLibrary(librarySearch.trim(), !libraryPaid));
+    } catch (error) {
+      setLibraryResults(null);
+      setLibraryError(String(error));
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  /** Plays a piece of it, or stops the piece already playing.
+   *
+   * One element for the lot: two sounds at once is nobody's idea of an
+   * audition, and a new element per row would leave a dozen of them
+   * loaded after a dozen presses. */
+  function auditionSound(item: LibraryItem) {
+    const playing = libraryAudio.current;
+    if (playing && libraryPlaying === item.id) {
+      playing.pause();
+      setLibraryPlaying(null);
+      return;
+    }
+    playing?.pause();
+    const sound = new Audio(item.previewUrl);
+    sound.onended = () => setLibraryPlaying(null);
+    sound.onerror = () => {
+      setLibraryPlaying(null);
+      setLibraryError("That sound could not be played.");
+    };
+    libraryAudio.current = sound;
+    setLibraryPlaying(item.id);
+    void sound.play().catch(() => setLibraryPlaying(null));
   }
 
   function addZoomPoint() {
@@ -2677,9 +2763,28 @@ export function EditorShell({
     selectedClip != null &&
     (Boolean(selectedClip.clip.soundOnly) ||
       mediaByPath.get(selectedClip.clip.mediaPath)?.kind === "audio");
-  const agreedSpeed = agreeOn((clip) => speedOf(clip));
-  const speedMixed = selectedClips.length > 1 && agreedSpeed === undefined;
-  const selectedSpeed = agreedSpeed ?? (selectedClip ? speedOf(selectedClip.clip) : 1);
+  /** The clips the speed box is set on, looked up afresh each render:
+   * changing a speed replaces the clips, and a box holding the old ones
+   * would show a length that stopped changing. */
+  const speedClips: TimelineClip[] = speedFor
+    ? speedFor
+        .map((id) => clipsById.get(id)?.clip)
+        .filter((clip): clip is TimelineClip => clip != null)
+    : [];
+  const speedAgreed =
+    speedClips.length > 0 &&
+    speedClips.every((clip) => Math.abs(speedOf(clip) - speedOf(speedClips[0])) < 0.001)
+      ? speedOf(speedClips[0])
+      : undefined;
+  const speedMixed = speedClips.length > 1 && speedAgreed === undefined;
+  const speedNow = speedAgreed ?? (speedClips[0] ? speedOf(speedClips[0]) : 1);
+
+  /** Gives the speed to every clip the box was opened on. */
+  function applySpeed(speed: number) {
+    const wanted = Math.min(MAX_SPEED, Math.max(MIN_SPEED, speed));
+    if (!Number.isFinite(wanted) || speedFor == null) return;
+    onSetSpeed(speedFor, wanted);
+  }
   const selectedTransition = agreeOn((clip) =>
     transitionEdge === "in" ? clip.transitionIn : clip.transitionOut,
   );
@@ -2788,6 +2893,34 @@ export function EditorShell({
       window.removeEventListener("scroll", close, true);
     };
   }, [clipMenu, layerMenu, noteMenu]);
+
+  // An audition stops when the panel is left; a sound going on behind a
+  // tab nobody is looking at is a sound nobody can stop.
+  useEffect(() => {
+    if (activeTab === "library") return;
+    libraryAudio.current?.pause();
+    setLibraryPlaying(null);
+  }, [activeTab]);
+
+  // Escape shuts the player too.
+  useEffect(() => {
+    if (!playing) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPlaying(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [playing]);
+
+  // Escape shuts the speed box, like every other box in this editor.
+  useEffect(() => {
+    if (!speedFor) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSpeedFor(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [speedFor]);
 
   // A note's panel closes on Escape, or on a press anywhere outside it.
   // Not on scroll, unlike the menus: it is being written in, and the
@@ -3579,15 +3712,24 @@ export function EditorShell({
 
   // Tick every 1/2/5/10/… seconds — whichever keeps the labels far enough
   // apart to stay readable at the current zoom.
+  //
+  // Marked across the whole ruler rather than only as far as the film
+  // goes: the lanes run to the edge of the pane now, and a ruler that
+  // stopped short of them would look like the page had been torn. The
+  // seconds past the end are real seconds — dropping a clip out there
+  // puts it out there.
   const ruler = useMemo(() => {
     const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
     const perSecond = trackWidth / timelineSeconds;
     const step = steps.find((s) => s * perSecond >= 70) ?? steps[steps.length - 1];
+    const across = Number.isFinite(perSecond) && perSecond > 0
+      ? laneWidth / perSecond
+      : timelineSeconds;
 
     const marks: number[] = [];
-    for (let s = 0; s <= Math.ceil(timelineSeconds); s += step) marks.push(s);
+    for (let s = 0; s <= Math.ceil(across); s += step) marks.push(s);
     return marks;
-  }, [timelineSeconds, trackWidth]);
+  }, [timelineSeconds, trackWidth, laneWidth]);
 
   const playheadOffset = timeToPixels(currentTime);
 
@@ -3604,14 +3746,6 @@ export function EditorShell({
       {/* ------------------------------------------------------- top bar */}
       <header className="ed-topbar">
         <MenuBar menus={menus} />
-
-        <button
-          className="ed-iconbtn"
-          title="Delete project"
-          onClick={() => comingSoon("Delete project")}
-        >
-          <Icon name="trash" />
-        </button>
 
         <div className="ed-topbar-group">
           <button
@@ -3634,9 +3768,13 @@ export function EditorShell({
 
         <div className="ed-spacer" />
 
-        <button className="ed-pill" onClick={() => comingSoon("Clips library")}>
-          <Icon name="clips" />
-          <span>Clips</span>
+        <button
+          className="ed-pill"
+          title="Record the screen — or this editor — and bring it straight into this project"
+          onClick={onRecord}
+        >
+          <Icon name="video" />
+          <span>Recording</span>
         </button>
         <button
           className="ed-pill ed-pill-primary"
@@ -3653,15 +3791,6 @@ export function EditorShell({
           {/* stage toolbar */}
           <div className="ed-stage-toolbar">
             <div className="ed-stage-toolbar-left">
-              <button className="ed-chipbtn" onClick={() => comingSoon("Auto layout")}>
-                <Icon name="wand" />
-                <span>Auto</span>
-                <Icon name="chevron" className="ed-caret" />
-              </button>
-              <button className="ed-chipbtn" onClick={() => comingSoon("Crop")}>
-                <Icon name="crop" />
-                <span>Crop</span>
-              </button>
               <div className="ed-chipmenu">
                 <button
                   className="ed-chipbtn"
@@ -3721,16 +3850,6 @@ export function EditorShell({
               >
                 <Icon name="zoom-in" />
                 <span>Zoom point</span>
-              </button>
-            </div>
-            <div className="ed-stage-toolbar-right">
-              <span className="ed-muted">Preview quality</span>
-              <button
-                className="ed-chipbtn"
-                onClick={() => comingSoon("Preview quality")}
-              >
-                <span>Full</span>
-                <Icon name="chevron" className="ed-caret" />
               </button>
             </div>
           </div>
@@ -3802,7 +3921,7 @@ export function EditorShell({
                           : `Sound only at this point — ${audioLayers.length} audio clips playing, nothing on the video tracks.`
                         : timelineHasClips
                           ? "Nothing on the timeline at this point — the playhead is over a gap."
-                          : "Select a clip in the Media panel to preview it."}
+                          : "Drag media onto a track to begin. This window shows the timeline; to look at a file on its own, press play on it in the Media panel."}
                   </p>
                   {media.length === 0 && (
                     <button
@@ -3940,11 +4059,6 @@ export function EditorShell({
                             // a talking head.
                             onLoadedMetadata={(e) => {
                               const v = e.currentTarget;
-                              if (!timelineHasClips) {
-                                setVideoDuration(
-                                  Number.isFinite(v.duration) ? v.duration : 0,
-                                );
-                              }
                               // The clock is the authority on where we are;
                               // a freshly loaded file always says zero.
                               const within = mediaTimeAt(
@@ -4185,194 +4299,520 @@ export function EditorShell({
 
                   <div className="ed-section-head">
                     <h3 className="ed-section-title">Media</h3>
-                    <button
-                      className="ed-chipbtn"
-                      title="Record the screen — or this editor — and bring it straight into this project"
-                      onClick={onRecord}
-                    >
-                      <Icon name="video" />
-                      <span>Recording</span>
-                    </button>
-                    <button
-                      className="ed-chipbtn"
-                      onClick={() => onImportMedia("visual")}
-                    >
-                      <Icon name="plus" />
-                      <span>Import</span>
-                    </button>
                   </div>
 
-                  {visualMedia.length === 0 ? (
-                    <div className="ed-medialist-empty">
-                      <p>No videos or images in this project yet.</p>
+                  {/* Video, pictures and sound kept apart. A project of any
+                      size has more of one than the others, and hunting for
+                      a piece of music among forty takes is no way to
+                      spend an afternoon. */}
+                  <div className="ed-segmented" role="group" aria-label="Which media">
+                    {(
+                      [
+                        ["video", "Video", videoMedia.length],
+                        ["image", "Image", imageMedia.length],
+                        ["audio", "Audio", audioMedia.length],
+                        ["clip", "Clip", savedClips.length],
+                      ] as const
+                    ).map(([kind, label, count]) => (
                       <button
-                        className="ed-pill ed-pill-primary"
-                        onClick={() => onImportMedia("visual")}
+                        key={kind}
+                        className={`ed-segment ${mediaKind === kind ? "is-active" : ""}`}
+                        aria-pressed={mediaKind === kind}
+                        onClick={() => setMediaKind(kind)}
                       >
-                        <Icon name="plus" />
-                        <span>Import media</span>
+                        {label}
+                        {count > 0 && <span className="ed-segment-count">{count}</span>}
                       </button>
-                    </div>
-                  ) : (
-                    <div className="ed-medialist">
-                      {visualMedia.map((item) => (
-                        <MediaRow
-                          key={item.path}
-                          item={item}
-                          isActive={item.path === activeMediaPath}
-                          onSelect={() => onSelectMedia(item.path)}
-                          onRemove={() => onRemoveMedia(item.path)}
-                          onRelink={() => onRelinkMedia(item.path)}
-                          onDragStart={(e) => handleMediaDragStart(e, item)}
-                          onDragEnd={endDrag}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-
-              {activeTab === "audio" && (
-                <>
-                  <div className="ed-section-head">
-                    <h3 className="ed-section-title">Audio</h3>
-                    <button
-                      className="ed-chipbtn"
-                      onClick={() => onImportMedia("audio")}
-                    >
-                      <Icon name="plus" />
-                      <span>Import audio</span>
-                    </button>
+                    ))}
                   </div>
 
-                  {audioMedia.length === 0 ? (
-                    <div className="ed-medialist-empty">
-                      <p>No audio tracks in this project yet.</p>
-                      <button
-                        className="ed-pill ed-pill-primary"
-                        onClick={() => onImportMedia("audio")}
-                      >
-                        <Icon name="plus" />
-                        <span>Import audio</span>
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="ed-medialist">
-                      {audioMedia.map((item) => (
-                        <MediaRow
-                          key={item.path}
-                          item={item}
-                          isActive={item.path === activeMediaPath}
-                          onSelect={() => onSelectMedia(item.path)}
-                          onRemove={() => onRemoveMedia(item.path)}
-                          onRelink={() => onRelinkMedia(item.path)}
-                          onDragStart={(e) => handleMediaDragStart(e, item)}
-                          onDragEnd={endDrag}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-
-              {activeTab === "speed" && (
-                <>
-                  <div className="ed-section-head">
-                    <h3 className="ed-section-title">Speed</h3>
-                  </div>
-
-                  {!selectedClip ? (
-                    <div className="ed-medialist-empty">
-                      <p>Select a clip on the timeline to change how fast it plays.</p>
-                    </div>
-                  ) : isTextClip(selectedClip.clip) ? (
-                    <div className="ed-medialist-empty">
-                      <p>
-                        A title has no material to play through, so there is
-                        nothing to speed up. Drag its edges to change how long
-                        it stays on screen.
-                      </p>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="ed-speeds">
-                        {SPEED_PRESETS.map((preset) => (
-                          <button
-                            key={preset}
-                            className={`ed-speed ${
-                              !speedMixed && Math.abs(selectedSpeed - preset) < 0.001
-                                ? "is-active"
-                                : ""
-                            }`}
-                            aria-pressed={
-                              !speedMixed && Math.abs(selectedSpeed - preset) < 0.001
-                            }
-                            onClick={() => onSetSpeed(selectedClipIds, preset)}
-                          >
-                            {formatSpeed(preset)}
-                          </button>
+                  {mediaKind === "clip" ? (
+                    savedClips.length === 0 ? (
+                      <div className="ed-medialist-empty">
+                        <p>
+                          Nothing on the shelf yet. Right-click a clip on the
+                          timeline and choose "Save to Clip" — an intro, a sting,
+                          a sound you use in every video — and it will be here in
+                          every project, not just this one.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="ed-medialist">
+                        {savedClips.map((clip) => (
+                          <div className="ed-shelfclip" key={clip.id}>
+                            {clip.thumbnailPath ? (
+                              <img
+                                className="ed-shelfclip-shot"
+                                src={convertFileSrc(clip.thumbnailPath)}
+                                alt=""
+                                draggable={false}
+                              />
+                            ) : (
+                              <span className="ed-shelfclip-shot is-sound">
+                                <Icon name="speaker" />
+                              </span>
+                            )}
+                            <div className="ed-shelfclip-what">
+                              <span className="ed-sound-name" title={clip.name}>
+                                {clip.name}
+                              </span>
+                              <span className="ed-sound-by">
+                                {formatDuration(clip.seconds)} ·{" "}
+                                {clip.kind === "audio" ? "sound" : "video"}
+                              </span>
+                            </div>
+                            <button
+                              className="ed-sound-play"
+                              title="Play it"
+                              onClick={() =>
+                                setPlaying({
+                                  path: clip.path,
+                                  name: clip.name,
+                                  kind: clip.kind === "audio" ? "audio" : "video",
+                                })
+                              }
+                            >
+                              <Icon name="play" />
+                            </button>
+                            <button
+                              className="ed-pill"
+                              disabled={usingClip === clip.id}
+                              title="Put it in this project's media"
+                              onClick={() => {
+                                setUsingClip(clip.id);
+                                void onUseClip(clip)
+                                  .then(() => setToast(`${clip.name} added.`))
+                                  .catch((error) => setToast(String(error)))
+                                  .finally(() => setUsingClip(null));
+                              }}
+                            >
+                              {usingClip === clip.id ? "…" : "Use"}
+                            </button>
+                            <button
+                              className="ed-iconbtn"
+                              title="Take it off the shelf"
+                              onClick={() => onDeleteClip(clip.id)}
+                            >
+                              <Icon name="trash" />
+                            </button>
+                          </div>
                         ))}
                       </div>
+                    )
+                  ) : (
+                  <>
+                  {/* One for each kind, because each kind is imported
+                      differently: the file picker offers video and
+                      pictures for one and sound for the other, and a
+                      single button would have to guess which was meant. */}
+                  <button
+                    className="ed-chipbtn ed-import"
+                    onClick={() => onImportMedia(mediaKind === "audio" ? "audio" : "visual")}
+                  >
+                    <Icon name="plus" />
+                    <span>
+                      {mediaKind === "video"
+                        ? "Import video"
+                        : mediaKind === "image"
+                          ? "Import image"
+                          : "Import audio"}
+                    </span>
+                  </button>
 
-                      <div className="ed-field">
-                        <label className="ed-field-label" htmlFor="ed-speed">
-                          Speed
-                          <span className="ed-field-value">
-                            {speedMixed ? "mixed" : formatSpeed(selectedSpeed)}
-                          </span>
-                        </label>
-                        <input
-                          id="ed-speed"
-                          className="ed-range"
-                          type="range"
-                          min={MIN_SPEED}
-                          max={MAX_SPEED}
-                          step={0.05}
-                          value={selectedSpeed}
-                          style={{
-                            ["--ed-fill" as string]: `${
-                              ((selectedSpeed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)) * 100
-                            }%`,
-                          }}
-                          onChange={(e) =>
-                            onSetSpeed(selectedClipIds, Number(e.currentTarget.value))
+                  {shownMedia.length === 0 ? (
+                    <div className="ed-medialist-empty">
+                      <p>
+                        {mediaKind === "video"
+                          ? "No videos in this project yet."
+                          : mediaKind === "image"
+                            ? "No pictures in this project yet."
+                            : "No sound in this project yet."}
+                      </p>
+                      <button
+                        className="ed-pill ed-pill-primary"
+                        onClick={() =>
+                          onImportMedia(mediaKind === "audio" ? "audio" : "visual")
+                        }
+                      >
+                        <Icon name="plus" />
+                        <span>
+                          {mediaKind === "audio" ? "Import audio" : "Import media"}
+                        </span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="ed-medialist">
+                      {shownMedia.map((item) => (
+                        <MediaRow
+                          key={item.path}
+                          item={item}
+                          isActive={item.path === activeMediaPath}
+                          onSelect={() => onSelectMedia(item.path)}
+                          onPlay={() =>
+                            setPlaying({
+                              path: item.path,
+                              name: item.name,
+                              kind:
+                                item.kind === "audio"
+                                  ? "audio"
+                                  : item.kind === "image"
+                                    ? "image"
+                                    : "video",
+                            })
                           }
+                          onRemove={() => onRemoveMedia(item.path)}
+                          onRelink={() => onRelinkMedia(item.path)}
+                          onDragStart={(e) => handleMediaDragStart(e, item)}
+                          onDragEnd={endDrag}
                         />
+                      ))}
+                    </div>
+                  )}
+                  </>
+                  )}
+                </>
+              )}
+
+              {activeTab === "library" && (
+                <>
+                  <div className="ed-section-head">
+                    <h3 className="ed-section-title">Sound library</h3>
+                  </div>
+
+                  {!libraryKeySet ? (
+                    <>
+                      <p className="ed-muted ed-note">
+                        Thousands of freely licensed sounds, searched from here and
+                        brought straight into the project. It runs on Freesound,
+                        which is free but asks for a key of your own — one account,
+                        no payment.
+                      </p>
+                      <div className="ed-engine-key">
+                        <input
+                          className="ed-input"
+                          type="password"
+                          autoComplete="off"
+                          spellCheck={false}
+                          placeholder="Paste the API token"
+                          value={libraryTypedKey}
+                          onChange={(e) => {
+                            const typing = e.currentTarget.value;
+                            setLibraryTypedKey(typing);
+                          }}
+                        />
+                        <button
+                          className="ed-pill"
+                          disabled={libraryTypedKey.trim().length === 0}
+                          onClick={() => {
+                            onSaveLibraryKey(libraryTypedKey.trim());
+                            setLibraryTypedKey("");
+                          }}
+                        >
+                          Save
+                        </button>
+                      </div>
+                      <button
+                        className="ed-engine-link"
+                        title="https://freesound.org/apiv2/apply/"
+                        onClick={() => {
+                          void openUrl("https://freesound.org/apiv2/apply/").catch(() =>
+                            setToast("https://freesound.org/apiv2/apply/"),
+                          );
+                        }}
+                      >
+                        Where to get a key
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="ed-engine-key">
+                        <input
+                          className="ed-input"
+                          type="search"
+                          placeholder="Rain, keyboard, whoosh…"
+                          value={librarySearch}
+                          onChange={(e) => {
+                            const typing = e.currentTarget.value;
+                            setLibrarySearch(typing);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void runLibrarySearch();
+                          }}
+                        />
+                        <button
+                          className="ed-pill ed-pill-primary"
+                          disabled={libraryBusy || librarySearch.trim().length === 0}
+                          onClick={() => void runLibrarySearch()}
+                        >
+                          {libraryBusy ? "…" : "Search"}
+                        </button>
                       </div>
 
-                      <p className="ed-note">
-                        {selectedClips.length > 1 ? (
-                          <>
-                            {countedClips(selectedClips.length)} picked out; a speed
-                            chosen here is given to all of them.
-                          </>
-                        ) : (
-                          <>
-                            {formatDuration(
-                              mediaSpan(
-                                selectedClip.clip,
-                                selectedClip.clip.durationSeconds,
-                              ),
-                            )}{" "}
-                            of footage in{" "}
-                            {formatDuration(selectedClip.clip.durationSeconds)} on the
-                            timeline.
-                          </>
-                        )}{" "}
-                        Whatever follows on the same track moves along, so the change
-                        leaves neither a gap nor an overlap.
+                      <label className="ed-engine-head ed-library-filter">
+                        <input
+                          type="checkbox"
+                          checked={libraryPaid}
+                          onChange={(e) => {
+                            const wanted = e.currentTarget.checked;
+                            setLibraryPaid(wanted);
+                          }}
+                        />
+                        <span className="ed-engine-name">
+                          Only sound I can use in paid work
+                        </span>
+                      </label>
+
+                      {libraryError && (
+                        <div className="ed-missing" role="alert">
+                          <p>{libraryError}</p>
+                        </div>
+                      )}
+
+                      {libraryResults && (
+                        <>
+                          <p className="ed-muted ed-note">
+                            {libraryResults.items.length} of {libraryResults.total}{" "}
+                            shown
+                            {libraryResults.hidden > 0 && (
+                              <>
+                                {" "}
+                                · {libraryResults.hidden} left out as non-commercial
+                              </>
+                            )}
+                            . Sound is fetched at preview quality — enough for an
+                            effect, and all a plain key allows.
+                          </p>
+
+                          <div className="ed-library">
+                            {libraryResults.items.map((item) => (
+                              <div className="ed-sound" key={item.id}>
+                                <button
+                                  className="ed-sound-play"
+                                  title={
+                                    libraryPlaying === item.id ? "Stop" : "Hear it"
+                                  }
+                                  onClick={() => auditionSound(item)}
+                                >
+                                  <Icon
+                                    name={libraryPlaying === item.id ? "pause" : "play"}
+                                  />
+                                </button>
+                                <div className="ed-sound-what">
+                                  <span className="ed-sound-name" title={item.name}>
+                                    {item.name}
+                                  </span>
+                                  <span className="ed-sound-by">
+                                    {formatDuration(item.seconds)} · {item.author}
+                                  </span>
+                                  <span
+                                    className={`ed-sound-licence is-${item.licence}`}
+                                    title={item.licenceUrl}
+                                  >
+                                    {LICENCE_LABELS[item.licence]}
+                                  </span>
+                                </div>
+                                <button
+                                  className="ed-pill"
+                                  disabled={libraryAdding === item.id}
+                                  title="Fetch it and put it in this project's media"
+                                  onClick={() => {
+                                    setLibraryAdding(item.id);
+                                    void onAddLibrarySound(item)
+                                      .then(() => {
+                                        setToast(
+                                          item.licence === "cc0"
+                                            ? `${item.name} added.`
+                                            : `${item.name} added — credit ${item.author}.`,
+                                        );
+                                      })
+                                      .catch((error) => setLibraryError(String(error)))
+                                      .finally(() => setLibraryAdding(null));
+                                  }}
+                                >
+                                  {libraryAdding === item.id ? "…" : "Add"}
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
+
+                      <p className="ed-muted ed-note">
+                        Everything but CC0 asks for the maker to be credited. The
+                        names are written into a CREDITS file beside the fetched
+                        sound, so nothing has to be remembered.
                       </p>
-                      <p className="ed-note">
-                        The sound speeds up with the picture but keeps its own
-                        voice — nothing rises or drops in pitch.
-                      </p>
+                      <button
+                        className="ed-engine-link"
+                        onClick={() => onSaveLibraryKey("")}
+                      >
+                        Forget the library key
+                      </button>
                     </>
                   )}
                 </>
               )}
 
-              {activeTab === "captions" && (
+              {activeTab === "art" && (
                 <>
+                  {/* Words by hand, words from what was said, and
+                      pictures: three things that all go over the
+                      picture, behind one tab rather than spread across
+                      the row. */}
+                  <div className="ed-segmented" role="group" aria-label="Which kind">
+                    {(
+                      [
+                        ["text", "Custom Text"],
+                        ["caption", "Auto Caption"],
+                        ["art", "Art"],
+                      ] as const
+                    ).map(([kind, label]) => (
+                      <button
+                        key={kind}
+                        className={`ed-segment ${artKind === kind ? "is-active" : ""}`}
+                        aria-pressed={artKind === kind}
+                        onClick={() => setArtKind(kind)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {artKind === "text" && (
+                    <>
+                  <div className="ed-section-head">
+                    <h3 className="ed-section-title">Text</h3>
+                    <button className="ed-chipbtn" onClick={addTextClip}>
+                      <Icon name="plus" />
+                      <span>Add title</span>
+                    </button>
+                  </div>
+
+                  {!selectedText || !selectedText.text ? (
+                    <div className="ed-medialist-empty">
+                      <p>
+                        Select a title on the timeline to change its words, or
+                        add one at the playhead.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="ed-field">
+                        <label className="ed-field-label" htmlFor="ed-text-content">
+                          Words
+                        </label>
+                        <textarea
+                          id="ed-text-content"
+                          className="ed-textarea"
+                          rows={3}
+                          value={selectedText.text.content}
+                          onChange={(e) =>
+                            onUpdateText(selectedText.id, {
+                              ...selectedText.text!,
+                              content: e.currentTarget.value,
+                            })
+                          }
+                        />
+                      </div>
+
+                      <div className="ed-field">
+                        <label className="ed-field-label" htmlFor="ed-text-size">
+                          Size
+                        </label>
+                        <input
+                          id="ed-text-size"
+                          className="ed-range"
+                          type="range"
+                          min={2}
+                          max={30}
+                          value={Math.round(selectedText.text.size * 100)}
+                          style={{
+                            ["--ed-fill" as string]: `${
+                              ((selectedText.text.size * 100 - 2) / 28) * 100
+                            }%`,
+                          }}
+                          onChange={(e) =>
+                            onUpdateText(selectedText.id, {
+                              ...selectedText.text!,
+                              size: Number(e.currentTarget.value) / 100,
+                            })
+                          }
+                        />
+                      </div>
+
+                      <div className="ed-textrow">
+                        <label className="ed-textswatch">
+                          <span>Colour</span>
+                          <input
+                            type="color"
+                            value={selectedText.text.color}
+                            onChange={(e) =>
+                              onUpdateText(selectedText.id, {
+                                ...selectedText.text!,
+                                color: e.currentTarget.value,
+                              })
+                            }
+                          />
+                        </label>
+
+                        <label className="ed-textswatch">
+                          <span>Panel</span>
+                          <input
+                            type="color"
+                            value={selectedText.text.background ?? "#0b2016"}
+                            disabled={selectedText.text.background === null}
+                            onChange={(e) =>
+                              onUpdateText(selectedText.id, {
+                                ...selectedText.text!,
+                                background: e.currentTarget.value,
+                              })
+                            }
+                          />
+                        </label>
+                      </div>
+
+                      <div className="ed-textrow">
+                        <label className="ed-textcheck">
+                          <input
+                            type="checkbox"
+                            checked={selectedText.text.background !== null}
+                            onChange={(e) =>
+                              onUpdateText(selectedText.id, {
+                                ...selectedText.text!,
+                                background: e.currentTarget.checked
+                                  ? "#0b2016"
+                                  : null,
+                              })
+                            }
+                          />
+                          <span>Panel behind</span>
+                        </label>
+                        <label className="ed-textcheck">
+                          <input
+                            type="checkbox"
+                            checked={selectedText.text.bold}
+                            onChange={(e) =>
+                              onUpdateText(selectedText.id, {
+                                ...selectedText.text!,
+                                bold: e.currentTarget.checked,
+                              })
+                            }
+                          />
+                          <span>Bold</span>
+                        </label>
+                      </div>
+
+                      <p className="ed-note">
+                        Drag the title on the stage to move it. Its length on
+                        the timeline is how long it shows for.
+                      </p>
+                    </>
+                  )}
+                    </>
+                  )}
+
+                  {artKind === "caption" && (
+                    <>
                   <div className="ed-section-head">
                     <h3 className="ed-section-title">Auto caption</h3>
                   </div>
@@ -4547,6 +4987,24 @@ export function EditorShell({
                       Put a key in above and tick a service to start.
                     </p>
                   )}
+                    </>
+                  )}
+
+                  {artKind === "art" && (
+                    <div className="ed-medialist-empty">
+                      <p>
+                        Nothing here yet. This is where a library of pictures
+                        will go — stickers, arrows, shapes and moving graphics
+                        to lay over the film.
+                      </p>
+                      <p className="ed-note">
+                        Deliberately empty rather than half-built: whatever goes
+                        in here has to be drawn the same way by the preview and
+                        by the renderer, or the finished file would not be what
+                        was on screen.
+                      </p>
+                    </div>
+                  )}
                 </>
               )}
 
@@ -4693,139 +5151,6 @@ export function EditorShell({
                 </>
               )}
 
-              {activeTab === "text" && (
-                <>
-                  <div className="ed-section-head">
-                    <h3 className="ed-section-title">Text</h3>
-                    <button className="ed-chipbtn" onClick={addTextClip}>
-                      <Icon name="plus" />
-                      <span>Add title</span>
-                    </button>
-                  </div>
-
-                  {!selectedText || !selectedText.text ? (
-                    <div className="ed-medialist-empty">
-                      <p>
-                        Select a title on the timeline to change its words, or
-                        add one at the playhead.
-                      </p>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="ed-field">
-                        <label className="ed-field-label" htmlFor="ed-text-content">
-                          Words
-                        </label>
-                        <textarea
-                          id="ed-text-content"
-                          className="ed-textarea"
-                          rows={3}
-                          value={selectedText.text.content}
-                          onChange={(e) =>
-                            onUpdateText(selectedText.id, {
-                              ...selectedText.text!,
-                              content: e.currentTarget.value,
-                            })
-                          }
-                        />
-                      </div>
-
-                      <div className="ed-field">
-                        <label className="ed-field-label" htmlFor="ed-text-size">
-                          Size
-                        </label>
-                        <input
-                          id="ed-text-size"
-                          className="ed-range"
-                          type="range"
-                          min={2}
-                          max={30}
-                          value={Math.round(selectedText.text.size * 100)}
-                          style={{
-                            ["--ed-fill" as string]: `${
-                              ((selectedText.text.size * 100 - 2) / 28) * 100
-                            }%`,
-                          }}
-                          onChange={(e) =>
-                            onUpdateText(selectedText.id, {
-                              ...selectedText.text!,
-                              size: Number(e.currentTarget.value) / 100,
-                            })
-                          }
-                        />
-                      </div>
-
-                      <div className="ed-textrow">
-                        <label className="ed-textswatch">
-                          <span>Colour</span>
-                          <input
-                            type="color"
-                            value={selectedText.text.color}
-                            onChange={(e) =>
-                              onUpdateText(selectedText.id, {
-                                ...selectedText.text!,
-                                color: e.currentTarget.value,
-                              })
-                            }
-                          />
-                        </label>
-
-                        <label className="ed-textswatch">
-                          <span>Panel</span>
-                          <input
-                            type="color"
-                            value={selectedText.text.background ?? "#0b2016"}
-                            disabled={selectedText.text.background === null}
-                            onChange={(e) =>
-                              onUpdateText(selectedText.id, {
-                                ...selectedText.text!,
-                                background: e.currentTarget.value,
-                              })
-                            }
-                          />
-                        </label>
-                      </div>
-
-                      <div className="ed-textrow">
-                        <label className="ed-textcheck">
-                          <input
-                            type="checkbox"
-                            checked={selectedText.text.background !== null}
-                            onChange={(e) =>
-                              onUpdateText(selectedText.id, {
-                                ...selectedText.text!,
-                                background: e.currentTarget.checked
-                                  ? "#0b2016"
-                                  : null,
-                              })
-                            }
-                          />
-                          <span>Panel behind</span>
-                        </label>
-                        <label className="ed-textcheck">
-                          <input
-                            type="checkbox"
-                            checked={selectedText.text.bold}
-                            onChange={(e) =>
-                              onUpdateText(selectedText.id, {
-                                ...selectedText.text!,
-                                bold: e.currentTarget.checked,
-                              })
-                            }
-                          />
-                          <span>Bold</span>
-                        </label>
-                      </div>
-
-                      <p className="ed-note">
-                        Drag the title on the stage to move it. Its length on
-                        the timeline is how long it shows for.
-                      </p>
-                    </>
-                  )}
-                </>
-              )}
-
               {activeTab === "background" && (
                 <>
                   <h3 className="ed-section-title">Background Image</h3>
@@ -4936,26 +5261,12 @@ export function EditorShell({
                 if (e.target === e.currentTarget) onSelectClips([]);
               }}
             >
-              {/* The strip the track names sit on, unbroken from the foot
-                  of the ruler to the last row.
-
-                  Each name has its own opaque background, but only for the
-                  height of its own row — and between rows there is a gap
-                  with nothing in it, which the playhead showed straight
-                  through as it scrolled behind the column. This fills
-                  those gaps and nothing else. */}
-              <span
-                className="ed-timeline-gutter"
-                style={{ height: tracksHeight }}
-                aria-hidden="true"
-              />
-
               <div className="ed-rulerrow">
                 <div className="ed-rulerrow-side" />
                 <div
                   className={`ed-ruler ${scrubbing ? "is-scrubbing" : ""}`}
                   ref={rulerRef}
-                  style={{ width: trackWidth }}
+                  style={{ width: laneWidth }}
                   onMouseDown={startScrub}
                   onContextMenu={(e) => {
                     e.preventDefault();
@@ -5017,7 +5328,7 @@ export function EditorShell({
                     <span
                       key={s}
                       className="ed-tick"
-                      style={{ left: `${(s / timelineSeconds) * 100}%` }}
+                      style={{ left: `${s * pixelsPerSecond}px` }}
                     >
                       <i className="ed-tick-line" />
                       <em className="ed-tick-label">{formatTick(s)}</em>
@@ -5126,7 +5437,7 @@ export function EditorShell({
                       className={`ed-lane ${isDragging ? "is-dragging" : ""} ${
                         isTarget ? "is-dropping" : ""
                       }`}
-                      style={{ width: trackWidth }}
+                      style={{ width: laneWidth }}
                       onDragOver={(e) => handleLaneDragOver(e, track.id)}
                       onDragLeave={(e) => {
                         // Moving onto a clip inside this lane fires
@@ -5472,12 +5783,29 @@ Right-click for audio options`}
                   </div>
                 );
               })}
+
+              {/* The playhead, inside the rows it runs through.
+
+                  It used to sit outside them and be given a height in
+                  pixels, measured from the rows. A measurement taken
+                  while the window was hidden — which is exactly what
+                  happens while recording, when the app steps out of the
+                  way — comes back as zero, and a line no pixels tall is a
+                  line nobody can see. In here it simply stretches from the
+                  first row to the last, and there is nothing to measure. */}
+              {timelineHasClips && (
+                <div
+                  className="ed-playhead"
+                  ref={playheadRef}
+                  style={{ transform: `translateX(${playheadOffset}px)` }}
+                />
+              )}
               </div>
 
               {tracks.length === 0 && (
                 <div className="ed-trackrow">
                   <div className="ed-tracklabel is-empty" />
-                  <div className="ed-lane-none" style={{ width: trackWidth }}>
+                  <div className="ed-lane-none" style={{ width: laneWidth }}>
                     No tracks yet — add one, then drag media onto it.
                   </div>
                 </div>
@@ -5497,16 +5825,6 @@ Right-click for audio options`}
                 </span>
               </button>
 
-              {timelineHasClips && (
-                <div
-                  className="ed-playhead"
-                  ref={playheadRef}
-                  style={{
-                    transform: `translateX(${playheadOffset}px)`,
-                    height: tracksHeight,
-                  }}
-                />
-              )}
             </div>
           </div>
         </footer>
@@ -5719,6 +6037,44 @@ Right-click for audio options`}
           <button
             className="ed-clipmenu-item"
             role="menuitem"
+            disabled={isTextClip(menuTarget.clip)}
+            title={
+              isTextClip(menuTarget.clip)
+                ? "A title is words rather than footage; there is nothing to cut out and keep"
+                : "Keep this piece on the shelf, for every project rather than only this one"
+            }
+            onClick={() => {
+              const clipId = clipMenu.clipId;
+              setClipMenu(null);
+              setToast("Saving to the shelf…");
+              void onSaveClip(clipId)
+                .then(() => setToast("Saved to Clip."))
+                .catch((error) => setToast(String(error)));
+            }}
+          >
+            <Icon name="clips" />
+            <span>Save to Clip</span>
+          </button>
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
+            disabled={isTextClip(menuTarget.clip)}
+            title={
+              isTextClip(menuTarget.clip)
+                ? "A title has no material to play through, so there is nothing to speed up"
+                : "How fast this clip plays, and how long it takes on the timeline"
+            }
+            onClick={() => {
+              setSpeedFor(menuSelection);
+              setClipMenu(null);
+            }}
+          >
+            <Icon name="wand" />
+            <span>Speed…</span>
+          </button>
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
             title="Zoom in on everything that was clicked, from what the recorder wrote down while this was captured"
             onClick={() => {
               const clipId = clipMenu.clipId;
@@ -5836,6 +6192,221 @@ Right-click for audio options`}
             <button className="ed-pill ed-pill-primary" onClick={() => setOpenNote(null)}>
               Done
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* A file, played where it cannot be mistaken for the edit.
+
+          Everything in the Media panel opens here: video with its own
+          controls, sound with a bar, a picture simply shown. Nothing that
+          happens in this window touches the timeline. */}
+      {playing && (
+        <div
+          className="ed-modal-backdrop"
+          onPointerDown={(e) => {
+            if (e.target === e.currentTarget) setPlaying(null);
+          }}
+        >
+          <div
+            className="ed-modal ed-player"
+            role="dialog"
+            aria-modal="true"
+            aria-label={playing.name}
+          >
+            <div className="ed-modal-head">
+              <h2 title={playing.name}>{playing.name}</h2>
+              <button
+                className="ed-iconbtn"
+                title="Close"
+                onClick={() => setPlaying(null)}
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+
+            {playing.kind === "video" ? (
+              <video
+                className="ed-player-piece"
+                src={convertFileSrc(playing.path)}
+                controls
+                autoPlay
+              />
+            ) : playing.kind === "image" ? (
+              <img
+                className="ed-player-piece"
+                src={convertFileSrc(playing.path)}
+                alt={playing.name}
+                draggable={false}
+              />
+            ) : (
+              <div className="ed-player-sound">
+                <Icon name="speaker" className="ed-audio-glyph" />
+                <audio
+                  className="ed-player-piece"
+                  src={convertFileSrc(playing.path)}
+                  controls
+                  autoPlay
+                />
+              </div>
+            )}
+
+            <p className="ed-note">
+              This is the file on its own. The window behind is the
+              timeline — what the playhead is standing in.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* How fast a clip plays. Raised from the clip's own menu rather
+          than from a panel across the room: speed is a thing done to one
+          clip, and the clip is where the hand already is. */}
+      {speedFor && speedClips.length > 0 && (
+        <div
+          className="ed-modal-backdrop"
+          onPointerDown={(e) => {
+            if (e.target === e.currentTarget) setSpeedFor(null);
+          }}
+        >
+          <div className="ed-modal" role="dialog" aria-modal="true" aria-label="Speed">
+            <div className="ed-modal-head">
+              <h2>Speed</h2>
+              <button
+                className="ed-iconbtn"
+                title="Close"
+                onClick={() => setSpeedFor(null)}
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+
+            {/* Three ways to the same number: press one, drag it, or type
+                it. Whichever is used, the others follow. */}
+            <div className="ed-speeds">
+              {SPEED_PRESETS.map((preset) => (
+                <button
+                  key={preset}
+                  className={`ed-speed ${
+                    !speedMixed && Math.abs(speedNow - preset) < 0.001 ? "is-active" : ""
+                  }`}
+                  aria-pressed={!speedMixed && Math.abs(speedNow - preset) < 0.001}
+                  onClick={() => {
+                    setTypedSpeed(null);
+                    applySpeed(preset);
+                  }}
+                >
+                  {formatSpeed(preset)}
+                </button>
+              ))}
+            </div>
+
+            <div className="ed-field">
+              <label className="ed-field-label" htmlFor="ed-speed">
+                Drag
+                <span className="ed-field-value">
+                  {speedMixed ? "mixed" : formatSpeed(speedNow)}
+                </span>
+              </label>
+              <input
+                id="ed-speed"
+                className="ed-range"
+                type="range"
+                min={MIN_SPEED}
+                max={MAX_SPEED}
+                step={0.05}
+                value={speedNow}
+                style={{
+                  ["--ed-fill" as string]: `${
+                    ((speedNow - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)) * 100
+                  }%`,
+                }}
+                onChange={(e) => {
+                  const wanted = Number(e.currentTarget.value);
+                  setTypedSpeed(null);
+                  applySpeed(wanted);
+                }}
+              />
+            </div>
+
+            <div className="ed-field">
+              <label className="ed-field-label" htmlFor="ed-speed-typed">
+                Or type it
+                <span className="ed-field-value">
+                  {formatSpeed(MIN_SPEED)} – {formatSpeed(MAX_SPEED)}
+                </span>
+              </label>
+              <div className="ed-speed-typed">
+                <input
+                  id="ed-speed-typed"
+                  className="ed-input"
+                  type="number"
+                  inputMode="decimal"
+                  min={MIN_SPEED}
+                  max={MAX_SPEED}
+                  step={0.05}
+                  value={typedSpeed ?? (speedMixed ? "" : speedNow.toFixed(2))}
+                  onChange={(e) => {
+                    // Kept as text while it is being typed: a number field
+                    // that rewrites what is in it on every keystroke makes
+                    // "1.5" impossible to type, because "1." is not a
+                    // number and would be thrown away.
+                    const typing = e.currentTarget.value;
+                    setTypedSpeed(typing);
+                    const wanted = Number(typing);
+                    if (typing.trim() !== "" && Number.isFinite(wanted)) {
+                      applySpeed(wanted);
+                    }
+                  }}
+                  onBlur={() => setTypedSpeed(null)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      setTypedSpeed(null);
+                      setSpeedFor(null);
+                    }
+                  }}
+                />
+                <span className="ed-speed-x">×</span>
+              </div>
+            </div>
+
+            <p className="ed-note">
+              {speedClips.length > 1 ? (
+                <>
+                  {countedClips(speedClips.length)} picked out; a speed chosen here
+                  is given to all of them.
+                </>
+              ) : (
+                <>
+                  {formatDuration(
+                    mediaSpan(speedClips[0], speedClips[0].durationSeconds),
+                  )}{" "}
+                  of footage in {formatDuration(speedClips[0].durationSeconds)} on the
+                  timeline.
+                </>
+              )}{" "}
+              Whatever follows on the same track moves along, so the change leaves
+              neither a gap nor an overlap.
+            </p>
+            <p className="ed-note">
+              The sound speeds up with the picture but keeps its own voice —
+              nothing rises or drops in pitch.
+            </p>
+
+            <div className="ed-modal-actions">
+              <button className="ed-pill" onClick={() => applySpeed(1)}>
+                Back to 1×
+              </button>
+              <button
+                className="ed-pill ed-pill-primary"
+                onClick={() => {
+                  setTypedSpeed(null);
+                  setSpeedFor(null);
+                }}
+              >
+                Done
+              </button>
+            </div>
           </div>
         </div>
       )}
