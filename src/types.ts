@@ -1149,6 +1149,81 @@ export function trimClip(
  * one answer.
  *
  * Everything it does is one step to undo. */
+/** Cuts every clip that the playhead is standing in.
+ *
+ * Lifted out of the editor's own handler so that the scissors and an
+ * automatic edit cut by the same rule. Two copies of this would drift,
+ * and the day they did, an edit made from the transcript would divide a
+ * clip differently from the one made by hand — the kind of difference
+ * nobody notices until a volume line or a zoom comes out wrong.
+ *
+ * `clipId` narrows it to one clip; without it, every clip the moment
+ * crosses is cut. The count comes back because the caller tells the
+ * person how many clips were cut, and because nothing should be recorded
+ * for undo when the answer is none.
+ */
+export function splitClipAt(
+  tracks: TimelineTrack[],
+  atSeconds: number,
+  clipId?: string,
+): { tracks: TimelineTrack[]; cuts: number } {
+  let cuts = 0;
+  const next = tracks.map((track) => {
+    const clips: TimelineClip[] = [];
+    for (const clip of track.clips) {
+      const offset = atSeconds - clip.startSeconds;
+      // Too close to either end and one of the halves would be empty.
+      const splittable =
+        (clipId == null || clip.id === clipId) &&
+        offset > 0.05 &&
+        offset < clip.durationSeconds - 0.05;
+      if (!splittable) {
+        clips.push(clip);
+        continue;
+      }
+
+      const [before, after] = splitVolume(clip.volume, offset);
+      const resting = clip.layout ?? FULL_FRAME_LAYOUT;
+      const tail = toMillis(clip.durationSeconds - offset);
+      clips.push({
+        ...clip,
+        durationSeconds: toMillis(offset),
+        volume: before,
+        // The zoom is divided along with the sound. Handing both halves
+        // the whole list left the second one holding framings timed
+        // against a clip it is no longer part of.
+        layoutPoints: sliceLayout(clip.layoutPoints, 0, offset, resting),
+        // The cut is a cut: the first half keeps how it arrived, the
+        // second keeps how it leaves, and neither gains a transition at
+        // the join that the editor never asked for.
+        transitionOut: undefined,
+      });
+      clips.push({
+        ...clip,
+        id: newId("clip"),
+        startSeconds: toMillis(atSeconds),
+        durationSeconds: tail,
+        // The second half begins further into the file by as much
+        // material as the first half used, which at anything but normal
+        // speed is not the same as the time it took.
+        trimStartSeconds: toMillis(mediaTimeAt(clip, offset)),
+        volume: after,
+        layoutPoints: sliceLayout(
+          clip.layoutPoints,
+          offset,
+          clip.durationSeconds,
+          resting,
+        ),
+        transitionIn: undefined,
+      });
+      cuts += 1;
+    }
+    return clips.length === track.clips.length ? track : { ...track, clips };
+  });
+
+  return { tracks: next, cuts };
+}
+
 /** Where a clip can sit on a track without covering anything.
  *
  * Starts from where it was let go of and moves right, past the end of
@@ -1450,6 +1525,13 @@ export interface ProjectFile {
   /** Notes left along the timeline. Absent in projects saved before there
    * were any. */
   notes?: ProjectNote[];
+  /** What was heard, with the moment each word was said.
+   *
+   * Kept with the project rather than recomputed, because recomputing it
+   * means sending the audio to a paid service again. Absent in projects
+   * saved before it was carried, and in projects nothing has been
+   * transcribed in. */
+  words?: TimedWord[];
   activeMediaPath: string | null;
   settings: EditorSettings;
 }
@@ -1670,6 +1752,50 @@ export interface ExportProgress {
  * Never carries the key. What the editor is told is only whether a key has
  * been entered, so a key cannot reach a screenshot or a log by way of the
  * interface. */
+/** What a model is being asked to be.
+ *
+ * Three different jobs, and no one service does all three — nor, today,
+ * is any one service even capable of all three. So each is chosen on its
+ * own. */
+export type AiRole = "ears" | "eyes" | "brain";
+
+export const AI_ROLES: { id: AiRole; label: string; what: string }[] = [
+  {
+    id: "ears",
+    label: "Ears",
+    what: "Turns speech into words with times against them. Only a transcription service can do this.",
+  },
+  {
+    id: "eyes",
+    label: "Eyes",
+    what: "Describes a frame, so the editor can be asked about what is on screen.",
+  },
+  {
+    id: "brain",
+    label: "Brain",
+    what: "Reads the transcript and the timeline, and proposes the edits.",
+  },
+];
+
+/** One model the editor can call on.
+ *
+ * `hasKey` is about the provider, not this model: one key buys every
+ * model that provider offers. The key itself never comes back here. */
+export interface AiModel {
+  id: string;
+  /** The provider's id, which is what a key is filed under. */
+  provider: string;
+  providerName: string;
+  model: string;
+  note: string;
+  keysAt: string;
+  /** The roles this model is able to fill. */
+  roles: AiRole[];
+  hasKey: boolean;
+  /** The roles it is currently marked for. */
+  chosenFor: AiRole[];
+}
+
 export interface SpeechEngine {
   id: string;
   provider: string;
@@ -1688,6 +1814,29 @@ export interface CaptionSegment {
   start: number;
   duration: number;
   text: string;
+}
+
+/** One word, and when it was heard on the timeline.
+ *
+ * The transcription services time every word, and those times used to be
+ * used to group words into captions and then dropped. They are what
+ * transcript-driven editing is built from: to cut a filler word out of a
+ * take you have to know exactly when it was said.
+ *
+ * The times are timeline seconds, mapped the same way a caption's are, so
+ * a word can be handed straight to an edit without further arithmetic. */
+export interface TimedWord {
+  clipId: string;
+  word: string;
+  start: number;
+  end: number;
+}
+
+/** What a transcription run answers with: captions to lay down, and the
+ * words they were made from. */
+export interface CaptionResult {
+  captions: CaptionSegment[];
+  words: TimedWord[];
 }
 
 /** How far along a transcription is. */

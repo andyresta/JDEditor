@@ -21,6 +21,9 @@ import {
 } from "../export";
 import { frameGeometry } from "../frame";
 import { Launcher } from "./Launcher";
+import { apply as applyOps, type Operation } from "../ops";
+import { quietRanges, totalSeconds } from "../silence";
+import { useTheme } from "../theme";
 import { RecordingsList } from "./RecordingsList";
 import {
   AudioPeaks,
@@ -49,9 +52,7 @@ import {
   TextStyle,
   TimelineTrack,
   VolumePoint,
-  FULL_FRAME_LAYOUT,
   mediaKindFor,
-  mediaTimeAt,
   setClipSpeed,
   newId,
   newTrack,
@@ -64,21 +65,21 @@ import {
   CAPTION_TEXT_STYLE,
   speedOf,
   type CaptionProgress,
+  type TimedWord,
   type LibraryItem,
   type SavedClip,
   type SpeechEngine,
   settleOnTrack,
+  splitClipAt,
   removeLayoutAt,
   setLayoutAt,
   copyOf,
   type ClipMove,
-  sliceLayout,
   type CopiedClip,
   timeAgo,
   type RecoveryFile,
   type Transition,
   type WindowInfo,
-  splitVolume,
   trackKindOf,
   toMillis,
   trimClip,
@@ -189,6 +190,9 @@ interface ProjectState {
   /** Notes are part of the document, so undo has to carry them too —
    * deleting one by mistake should be as recoverable as deleting a clip. */
   notes: ProjectNote[];
+  /** The transcript, for the same reason: an edit moves the words, and
+   * stepping back has to move them back. */
+  words: TimedWord[];
   activeMediaPath: string | null;
   settings: EditorSettings;
 }
@@ -262,10 +266,20 @@ export function RecorderApp() {
     if (captureMode === "window") void refreshWindows();
   }, [captureMode, refreshWindows]);
   const [startingRecorder, setStartingRecorder] = useState(false);
+  /** Every word heard in the project, with the moment it was said.
+   *
+   * Part of the document: saved with the project, restored by undo, and
+   * carried along by any edit that moves the film underneath it. Left
+   * out of either and the second edit made from the transcript would cut
+   * in the wrong place. */
+  const [words, setWords] = useState<TimedWord[]>([]);
   const [deviceDebug, setDeviceDebug] = useState<string | null>(null);
   const [deviceDebugLoading, setDeviceDebugLoading] = useState(false);
 
   const [view, setView] = useState<"launcher" | "recorder" | "editor">("launcher");
+  /** Light or dark. Offered on every screen, because whichever one
+   * someone happens to be looking at is the one that is too bright. */
+  const { theme, toggle: toggleTheme } = useTheme();
 
   // The editor works on a project — a set of media plus how it's laid out
   // — which lives in a `.jd` file once saved.
@@ -370,10 +384,11 @@ export function RecorderApp() {
       media: projectMedia,
       tracks,
       notes,
+      words,
       activeMediaPath,
       settings: editorSettings,
     }),
-    [projectMedia, tracks, notes, activeMediaPath, editorSettings],
+    [projectMedia, tracks, notes, words, activeMediaPath, editorSettings],
   );
 
   /** Records the document as it is *now*, before the caller changes it.
@@ -406,6 +421,7 @@ export function RecorderApp() {
     setProjectMedia(state.media);
     setTracks(state.tracks);
     setNotes(state.notes ?? []);
+    setWords(state.words ?? []);
     setActiveMediaPath(state.activeMediaPath);
     setEditorSettings(state.settings);
     // A step back is still a change against what is on disk.
@@ -469,10 +485,11 @@ export function RecorderApp() {
       })),
       tracks,
       notes,
+      words,
       activeMediaPath,
       settings: editorSettings,
     }),
-    [projectMedia, tracks, notes, activeMediaPath, editorSettings],
+    [projectMedia, tracks, notes, words, activeMediaPath, editorSettings],
   );
 
   /** Writes the project, asking where to put it when it has no file yet
@@ -576,6 +593,7 @@ export function RecorderApp() {
         ),
       );
       setNotes(parsed.notes ?? []);
+      setWords(parsed.words ?? []);
       setSelectedClipIds([]);
       const active = parsed.activeMediaPath;
       setActiveMediaPath(
@@ -630,6 +648,7 @@ export function RecorderApp() {
     setProjectMedia([]);
     setTracks([newTrack("Track 1")]);
     setNotes([]);
+    setWords([]);
     setSelectedClipIds([]);
     setActiveMediaPath(null);
     setProjectPath(null);
@@ -749,6 +768,30 @@ export function RecorderApp() {
     };
     fit().catch(() => {});
   }, [view]);
+
+  // What this window is called.
+  //
+  // The name used to sit in a row of its own at the top of the Media
+  // panel, which spent a line of the editor saying something the window
+  // frame was already there to say. The dot that marked unsaved changes
+  // comes with it, as the bullet a title bar has always used for that.
+  useEffect(() => {
+    // The app first, then what is open in it: "JDEditor - testing2". An
+    // asterisk after the name when there is something unsaved, which is
+    // what the green dot in the Media panel used to say.
+    const title =
+      view === "editor"
+        ? `JDEditor - ${projectName}${isDirty ? "*" : ""}`
+        : "JDEditor";
+    // Reported rather than swallowed. This call is one Tauri asks
+    // permission for, and the first version of it was denied by a
+    // capability list that had never needed `allow-set-title` before —
+    // which an empty catch turned into a title bar that simply never
+    // changed, with nothing anywhere to say why.
+    getCurrentWindow()
+      .setTitle(title)
+      .catch((err) => console.error("could not set the window title", err));
+  }, [view, projectName, isDirty]);
 
   /** Hands these settings to the floating bar, which takes it from here:
    * picking the area, recording, pausing and stopping. This window steps
@@ -954,24 +997,6 @@ export function RecorderApp() {
     }
   }
 
-  async function handleSaveSpeechKey(engine: string, key: string) {
-    try {
-      setSpeechEngines(await api.saveSpeechKey(engine, key));
-      setCaptionError(null);
-    } catch (error) {
-      setCaptionError(String(error));
-    }
-  }
-
-  async function handleChooseSpeechEngine(engine: string) {
-    try {
-      setSpeechEngines(await api.chooseSpeechEngine(engine));
-      setCaptionError(null);
-    } catch (error) {
-      setCaptionError(String(error));
-    }
-  }
-
   /** Writes captions for everything audible on the timeline.
    *
    * The clips are sent one at a time and come back as captions in
@@ -995,7 +1020,7 @@ export function RecorderApp() {
 
     setCaptionRun({ stage: "listening", done: 0, total: heard.length, engine: "" });
     try {
-      const captions = await api.writeCaptions({
+      const { captions, words } = await api.writeCaptions({
         jobs: heard.map((clip) => ({
           clipId: clip.id,
           path: clip.mediaPath,
@@ -1009,6 +1034,11 @@ export function RecorderApp() {
         // Whichever is marked; the app decides, not this end.
         engine: "",
       });
+
+      // Kept whether or not the captions are usable: the words are worth
+      // more than the captions to anything that edits by transcript, and
+      // listening again costs another trip to the service.
+      setWords(words);
 
       const clips = captionClips(captions, CAPTION_TEXT_STYLE);
       if (clips.length === 0) {
@@ -1165,60 +1195,10 @@ export function RecorderApp() {
     // updater, because the caller is told how many clips were cut and a
     // count set inside an updater wouldn't be known yet — nor be counted
     // only once.
-    let cuts = 0;
-    const next = tracks.map((track) => {
-      const clips: TimelineClip[] = [];
-      for (const clip of track.clips) {
-        const offset = atSeconds - clip.startSeconds;
-        // Too close to either end and one of the halves would be empty.
-        const splittable =
-          (clipId == null || clip.id === clipId) &&
-          offset > 0.05 &&
-          offset < clip.durationSeconds - 0.05;
-        if (!splittable) {
-          clips.push(clip);
-          continue;
-        }
-
-        const [before, after] = splitVolume(clip.volume, offset);
-        const resting = clip.layout ?? FULL_FRAME_LAYOUT;
-        const tail = toMillis(clip.durationSeconds - offset);
-        clips.push({
-          ...clip,
-          durationSeconds: toMillis(offset),
-          volume: before,
-          // The zoom is divided along with the sound. Handing both halves
-          // the whole list left the second one holding framings timed
-          // against a clip it is no longer part of.
-          layoutPoints: sliceLayout(clip.layoutPoints, 0, offset, resting),
-          // The cut is a cut: the first half keeps how it arrived, the
-          // second keeps how it leaves, and neither gains a transition at
-          // the join that the editor never asked for.
-          transitionOut: undefined,
-        });
-        clips.push({
-          ...clip,
-          id: newId("clip"),
-          startSeconds: toMillis(atSeconds),
-          durationSeconds: tail,
-          // The second half begins further into the file by as much
-          // material as the first half used, which at anything but normal
-          // speed is not the same as the time it took.
-          trimStartSeconds: toMillis(mediaTimeAt(clip, offset)),
-          volume: after,
-          layoutPoints: sliceLayout(
-            clip.layoutPoints,
-            offset,
-            clip.durationSeconds,
-            resting,
-          ),
-          transitionIn: undefined,
-        });
-        cuts += 1;
-      }
-      return clips.length === track.clips.length ? track : { ...track, clips };
-    });
-
+    //
+    // The cutting itself lives in `splitClipAt`, so that an automatic
+    // edit divides a clip by exactly the rule the scissors use.
+    const { tracks: next, cuts } = splitClipAt(tracks, atSeconds, clipId);
     if (cuts === 0) return 0;
     remember("cut");
     setTracks(next);
@@ -1734,6 +1714,72 @@ export function RecorderApp() {
     setIsDirty(true);
   }
 
+  /** Takes every pause out of the timeline and closes the gaps.
+   *
+   * No model, no key, no network: the loudness envelope needed to draw
+   * the waveform already says where nothing is being said, and the
+   * operations layer already knows how to take a stretch out. This is
+   * the first thing built on both, and it is deliberately the one that
+   * needs no AI at all — if the edits it makes are wrong, the fault is
+   * in code that can be read, not in something a model guessed.
+   *
+   * Answers with what it did, so the editor can say so rather than
+   * appear to do nothing when there was nothing to cut. */
+  function handleRemoveSilences(): { ranges: number; seconds: number } {
+    const quiet = quietRanges(tracks, audioPeaks);
+    if (quiet.length === 0) return { ranges: 0, seconds: 0 };
+
+    // Latest first. Taking a stretch out pulls everything after it
+    // backwards, so working from the end means the stretches still to be
+    // done are all before the change and their times are still true.
+    const ops: Operation[] = [...quiet]
+      .reverse()
+      .map((range) => ({
+        kind: "removeRange",
+        fromSeconds: range.start,
+        toSeconds: range.end,
+      }));
+
+    const result = applyOps({ tracks, media: projectMedia, notes, words }, ops);
+    if (result.problems.length > 0) {
+      setError(result.problems[0]);
+      return { ranges: 0, seconds: 0 };
+    }
+
+    remember("remove-silence");
+    setTracks(result.doc.tracks);
+    // The notes and the transcript came along: a remark or a word
+    // pinned after a pause that has gone would otherwise be left
+    // pointing at the wrong moment.
+    setNotes(result.doc.notes);
+    setWords(result.doc.words);
+    setIsDirty(true);
+    return { ranges: quiet.length, seconds: totalSeconds(quiet) };
+  }
+
+  /** Takes one stretch of timeline out and closes the gap.
+   *
+   * What editing by transcript comes down to: a run of words is a run of
+   * seconds, and removing the words means removing the seconds they were
+   * said in. The same operation the pause remover uses, so the two
+   * cannot disagree about what removing a stretch means.
+   */
+  function handleRemoveSpan(fromSeconds: number, toSeconds: number): boolean {
+    const result = applyOps({ tracks, media: projectMedia, notes, words }, [
+      { kind: "removeRange", fromSeconds, toSeconds },
+    ]);
+    if (result.problems.length > 0) {
+      setError(result.problems[0]);
+      return false;
+    }
+    remember("remove-span");
+    setTracks(result.doc.tracks);
+    setNotes(result.doc.notes);
+    setWords(result.doc.words);
+    setIsDirty(true);
+    return true;
+  }
+
   function handleRemoveClips(clipIds: string[]) {
     if (clipIds.length === 0) return;
     const going = new Set(clipIds);
@@ -1795,13 +1841,21 @@ export function RecorderApp() {
       .catch(() => setCanFollowCursor(false));
   }, []);
 
-  // Which transcription services have keys, asked once on opening.
-  useEffect(() => {
+  /** Which transcription services have keys, and which is the ears.
+   *
+   * Asked on opening, and again whenever the AI provider box has been
+   * open: the caption panel reports that choice, and a panel reporting a
+   * stale answer is worse than one reporting none. */
+  const refreshSpeechEngines = useCallback(() => {
     api
       .speechEngines()
       .then(setSpeechEngines)
       .catch(() => setSpeechEngines([]));
   }, []);
+
+  useEffect(() => {
+    refreshSpeechEngines();
+  }, [refreshSpeechEngines]);
 
   // A transcription says where it has got to as it works through the
   // clips; an hour of speech is not a thing to do behind a still screen.
@@ -1960,8 +2014,6 @@ export function RecorderApp() {
         <EditorShell
           media={projectMedia}
           activeMediaPath={activeMediaPath}
-          projectName={projectName}
-          isDirty={isDirty}
           settings={editorSettings}
           tracks={tracks}
           selectedClipIds={selectedClipIds}
@@ -2020,8 +2072,10 @@ export function RecorderApp() {
           libraryKeySet={libraryKeySet}
           onSaveLibraryKey={handleSaveLibraryKey}
           speechEngines={speechEngines}
-          onSaveSpeechKey={handleSaveSpeechKey}
-          onChooseSpeechEngine={handleChooseSpeechEngine}
+          onRefreshSpeechEngines={refreshSpeechEngines}
+          onRemoveSilences={handleRemoveSilences}
+          words={words}
+          onRemoveSpan={handleRemoveSpan}
           onAutoCaption={handleAutoCaption}
           captionRun={captionRun}
           captionError={captionError}
@@ -2185,6 +2239,16 @@ export function RecorderApp() {
             🎬
           </button>
         </div>
+        {/* Beside the switch rather than up in the title bar: this row is
+            where the app's own settings sit, and the title bar is for
+            going back. */}
+        <button
+          className="capture-icon-button"
+          onClick={toggleTheme}
+          title={theme === "dark" ? "Switch to light" : "Switch to dark"}
+        >
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
       </div>
 
       {error && <div className="capture-error">{error}</div>}
@@ -2370,17 +2434,6 @@ export function RecorderApp() {
           >
             {keepAppOnScreen ? "On" : "Off"}
           </button>
-        </li>
-
-        <li className="capture-row">
-          <span className="capture-row-icon">🔊</span>
-          <span className="capture-row-empty">Record System Audio</span>
-          <span
-            className="capture-toggle capture-toggle-static"
-            title="Capturing system audio isn't wired up yet"
-          >
-            Off
-          </span>
         </li>
       </ul>
 

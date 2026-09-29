@@ -11,6 +11,7 @@ mod meter;
 mod models;
 mod overlay;
 mod project;
+mod providers;
 mod recorder;
 mod recordings;
 mod sidecar;
@@ -237,7 +238,7 @@ async fn audio_peaks(
 async fn write_captions(
     app: tauri::AppHandle,
     request: caption::CaptionRequest,
-) -> Result<Vec<caption::Caption>, String> {
+) -> Result<caption::CaptionResult, String> {
     blocking(move || caption::run(&app, request)).await?
 }
 
@@ -325,30 +326,46 @@ async fn speech_engines(app: tauri::AppHandle) -> Result<Vec<caption::EngineInfo
     blocking(move || Ok(caption::engines(&app))).await?
 }
 
-/// Puts a key in for one service, or takes it away again when given
-/// nothing.
+/* ------------------------------------------------------ AI providers */
+
+/// Every model the editor can call on, which of the three roles each can
+/// fill, whether its provider has a key, and which roles it is filling.
+///
+/// Never a key itself: what comes back is only that one exists, so a key
+/// cannot reach a log or a screenshot by way of the interface.
 #[tauri::command]
-async fn save_speech_key(
+async fn ai_models(app: tauri::AppHandle) -> Result<Vec<providers::Model>, String> {
+    blocking(move || Ok(providers::models(&app))).await?
+}
+
+/// Puts a key in for one provider, or takes it away when given nothing.
+///
+/// By provider rather than by model: one key buys every model that
+/// provider offers, and asking for it twice would be asking twice for
+/// the same thing.
+#[tauri::command]
+async fn save_ai_key(
     app: tauri::AppHandle,
-    engine: String,
+    provider: String,
     key: String,
-) -> Result<Vec<caption::EngineInfo>, String> {
+) -> Result<Vec<providers::Model>, String> {
     blocking(move || {
-        caption::save_key(&app, &engine, &key)?;
-        Ok(caption::engines(&app))
+        providers::save_key(&app, &provider, &key)?;
+        Ok(providers::models(&app))
     })
     .await?
 }
 
-/// Marks one service as the one auto caption uses.
+/// Marks a model as the eyes, the ears or the brain.
 #[tauri::command]
-async fn choose_speech_engine(
+async fn choose_ai_model(
     app: tauri::AppHandle,
-    engine: String,
-) -> Result<Vec<caption::EngineInfo>, String> {
+    role: providers::Role,
+    model: String,
+) -> Result<Vec<providers::Model>, String> {
     blocking(move || {
-        caption::choose(&app, &engine)?;
-        Ok(caption::engines(&app))
+        providers::choose(&app, role, &model)?;
+        Ok(providers::models(&app))
     })
     .await?
 }
@@ -363,6 +380,9 @@ pub fn run() {
         .manage(bar::BarState::default())
         .manage(export::ExportState::default())
         .invoke_handler(tauri::generate_handler![
+            ai_models,
+            save_ai_key,
+            choose_ai_model,
             list_devices,
             check_ffmpeg,
             debug_device_scan,
@@ -403,8 +423,6 @@ pub fn run() {
             can_track_cursor,
             write_captions,
             speech_engines,
-            save_speech_key,
-            choose_speech_engine,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

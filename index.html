@@ -5,6 +5,33 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Tauri + React + Typescript</title>
+    <!-- Light or dark, decided before anything is painted.
+
+         The stylesheets key off this attribute rather than
+         `prefers-color-scheme`, so it has to be set before the first
+         frame; done from React it would land a paint too late and the
+         window would flash white on the way into a dark theme. Kept in
+         step afterwards by src/theme.ts, which is the only other thing
+         that writes it. -->
+    <script>
+      (function () {
+        var choice = "system";
+        try {
+          var kept = localStorage.getItem("jd-theme");
+          if (kept === "light" || kept === "dark" || kept === "system") {
+            choice = kept;
+          }
+        } catch (e) {
+          /* storage off: follow the system, which is the default anyway */
+        }
+        var dark =
+          choice === "dark" ||
+          (choice === "system" &&
+            typeof matchMedia === "function" &&
+            matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+      })();
+    </script>
   </head>
 
   <body>

@@ -5,7 +5,9 @@ import { IMPORT_FILTERS, PROJECT_EXTENSION } from "./types";
 import type {
   AudioPeaks,
   BarSetup,
-  CaptionSegment,
+  AiModel,
+  AiRole,
+  CaptionResult,
   CursorTrack,
   LibraryItem,
   LibraryResults,
@@ -123,12 +125,6 @@ export const api = {
   libraryKeySet: () => invoke<boolean>("library_key_set"),
   saveLibraryKey: (key: string) => invoke<boolean>("save_library_key", { key }),
   speechEngines: () => invoke<SpeechEngine[]>("speech_engines"),
-  /** Puts a key in for one service, or clears it when given nothing.
-   * Answers with the list as it now stands. */
-  saveSpeechKey: (engine: string, key: string) =>
-    invoke<SpeechEngine[]>("save_speech_key", { engine, key }),
-  chooseSpeechEngine: (engine: string) =>
-    invoke<SpeechEngine[]>("choose_speech_engine", { engine }),
   /** Listens to the given clips and answers with captions. Long-running:
    * it reports its way through `caption-progress` events. */
   writeCaptions: (request: {
@@ -143,7 +139,20 @@ export const api = {
     language: string;
     wordsPerCaption: number;
     engine: string;
-  }) => invoke<CaptionSegment[]>("write_captions", { request }),
+  }) => invoke<CaptionResult>("write_captions", { request }),
   cancelExport: () => invoke<void>("cancel_export"),
+
+  /* ------------------------------------------------------ AI providers */
+
+  /** Every model, its roles, and whether its provider has a key. Never a
+   * key: only that there is one. */
+  aiModels: () => invoke<AiModel[]>("ai_models"),
+  /** By provider, not by model — one key buys all of that provider's
+   * models. An empty key takes it away again. */
+  saveAiKey: (provider: string, key: string) =>
+    invoke<AiModel[]>("save_ai_key", { provider, key }),
+  /** Marks a model as the eyes, the ears or the brain. */
+  chooseAiModel: (role: AiRole, model: string) =>
+    invoke<AiModel[]>("choose_ai_model", { role, model }),
   revealFile: (path: string) => revealItemInDir(path),
 };

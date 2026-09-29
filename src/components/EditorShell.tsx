@@ -23,6 +23,8 @@ import {
 } from "../frame";
 import { drawTextLayer, textBounds } from "../textLayer";
 import { MenuBar, type MenuDef } from "./MenuBar";
+import { AiSettings } from "./AiSettings";
+import { useTheme } from "../theme";
 import {
   BACKDROP_CATEGORIES,
   BACKDROP_KINDS,
@@ -45,6 +47,7 @@ import {
   CAPTION_WORD_COUNTS,
   type CaptionProgress,
   type SpeechEngine,
+  type TimedWord,
   MAX_SPEED,
   mediaSpan,
   mediaTimeAt,
@@ -95,8 +98,9 @@ import "../editor.css";
 interface EditorShellProps {
   media: MediaItem[];
   activeMediaPath: string | null;
-  projectName: string;
-  isDirty: boolean;
+  /* The project's name and whether it has unsaved changes are the window
+     frame's business now, not this component's: they are set on the
+     window title in RecorderApp. */
   settings: EditorSettings;
   onSettingsChange: (next: EditorSettings) => void;
   onSelectMedia: (path: string) => void;
@@ -173,9 +177,18 @@ interface EditorShellProps {
    * for it, and which one auto caption will use. Never the keys. */
   speechEngines: SpeechEngine[];
   /** Puts a key in for one service, or clears it when given nothing. */
-  onSaveSpeechKey: (engine: string, key: string) => void;
+  /** Takes every pause out and closes the gaps, answering with how
+   * much went. */
+  onRemoveSilences: () => { ranges: number; seconds: number };
+  /** Every word heard in the film, timed against the timeline. */
+  words: TimedWord[];
+  /** Takes one stretch out and closes the gap. */
+  onRemoveSpan: (fromSeconds: number, toSeconds: number) => boolean;
+  /** Re-reads which service is marked, after the AI box has been in.
+   * The caption panel shows that choice, and a panel showing a stale
+   * answer is worse than one showing none. */
+  onRefreshSpeechEngines: () => void;
   /** Marks one service as the one auto caption uses. */
-  onChooseSpeechEngine: (engine: string) => void;
   onAutoCaption: (language: string, wordsPerCaption: number) => void;
   /** How far a transcription has got, or null when none is running. */
   captionRun: CaptionProgress | null;
@@ -442,7 +455,26 @@ type IconName =
   | "plus"
   | "close"
   | "search"
-  | "note";
+  | "note"
+  | "sun"
+  | "moon"
+  | "sparkle";
+
+/** Light or dark, by hand.
+ *
+ * Until it is pressed the app follows the system, and goes on following
+ * it as the system changes. Pressing it is a decision, and a decision is
+ * kept: from then on the app stays where it was put, whatever Windows
+ * does at sunset. */
+function ThemeToggle() {
+  const { theme, toggle } = useTheme();
+  const label = theme === "dark" ? "Switch to light" : "Switch to dark";
+  return (
+    <button className="ed-iconbtn" title={label} aria-label={label} onClick={toggle}>
+      <Icon name={theme === "dark" ? "sun" : "moon"} />
+    </button>
+  );
+}
 
 function Icon({ name, className }: { name: IconName; className?: string }) {
   return (
@@ -617,6 +649,30 @@ function iconPaths(name: IconName) {
           <circle cx="10.5" cy="10.5" r="6" />
           <path d="M15 15l5 5" />
         </>
+      );
+    // The button shows the theme it would switch *to*, so the sun means
+    // "make it light" rather than "it is light".
+    case "sun":
+      return (
+        <>
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4" />
+        </>
+      );
+    case "moon":
+      return <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />;
+    // A four-pointed star: the mark the whole industry has settled on for
+    // "a model did this". Filled rather than outlined, and only the one
+    // shape, because the button it sits in is sixteen pixels across and
+    // an outline that size reads as a smudge — which is exactly what was
+    // wrong with the wand it replaces.
+    case "sparkle":
+      return (
+        <path
+          fill="currentColor"
+          stroke="none"
+          d="M12 2.92c.72 5.7 3.38 8.36 9.08 9.08-5.7.72-8.36 3.38-9.08 9.08-.72-5.7-3.38-8.36-9.08-9.08C8.62 11.28 11.28 8.62 12 2.92Z"
+        />
       );
     // A sheet with its corner turned: a note left for whoever is editing.
     case "note":
@@ -897,8 +953,6 @@ function MediaRow({
 export function EditorShell({
   media,
   activeMediaPath,
-  projectName,
-  isDirty,
   settings,
   onSettingsChange,
   onSelectMedia,
@@ -945,8 +999,10 @@ export function EditorShell({
   onAutoZoom,
   onRecord,
   speechEngines,
-  onSaveSpeechKey,
-  onChooseSpeechEngine,
+  onRefreshSpeechEngines,
+  onRemoveSilences,
+  words,
+  onRemoveSpan,
   onAutoCaption,
   captionRun,
   captionError,
@@ -995,6 +1051,19 @@ export function EditorShell({
   const [mediaKind, setMediaKind] = useState<"video" | "image" | "audio" | "clip">(
     "video",
   );
+  /** Which words are picked out in the transcript, as the first and
+   * last of a run. Held as ids rather than as times so the selection
+   * survives an edit that moves the words underneath it. */
+  const [pickedWords, setPickedWords] = useState<{ from: number; to: number } | null>(
+    null,
+  );
+
+  /** The service marked as the ears, which is what Auto Caption uses. */
+  const ears = speechEngines.find((engine) => engine.isDefault) ?? null;
+
+  /** Whether the AI provider settings are open. App settings rather
+   * than project settings, so they live in a box of their own. */
+  const [aiOpen, setAiOpen] = useState(false);
   /** Which part of Art & Text is open. */
   const [artKind, setArtKind] = useState<ArtKind>("text");
   /** Which shelved clip is being fetched into the project, so its row can
@@ -1015,7 +1084,6 @@ export function EditorShell({
    * here and nowhere else: a saved key goes straight to the app's config
    * folder and never comes back, so this is only ever what is on screen
    * at this moment. */
-  const [typedKeys, setTypedKeys] = useState<Record<string, string>>({});
   /** The note being read or written, and where on screen its panel
    * goes. Null when none is open. */
   const [openNote, setOpenNote] = useState<{ id: string; x: number; y: number } | null>(
@@ -3671,6 +3739,18 @@ export function EditorShell({
           separatorBefore: true,
         },
         {
+          label: "Remove Silences",
+          onClick: () => {
+            const { ranges, seconds } = onRemoveSilences();
+            setToast(
+              ranges === 0
+                ? "Nothing quiet enough to take out."
+                : `${ranges} pause${ranges === 1 ? "" : "s"} removed — ${seconds.toFixed(1)}s shorter.`,
+            );
+          },
+          disabled: !timelineHasClips,
+        },
+        {
           // This one does work now, so it gets to advertise its key.
           label: "Delete Clip",
           onClick: deleteSelectedClips,
@@ -3765,6 +3845,17 @@ export function EditorShell({
             <Icon name="redo" />
           </button>
         </div>
+
+        <button
+          className="ed-iconbtn"
+          title="Choose which AI does the seeing, the hearing and the thinking"
+          aria-label="AI providers"
+          onClick={() => setAiOpen(true)}
+        >
+          <Icon name="sparkle" />
+        </button>
+
+        <ThemeToggle />
 
         <div className="ed-spacer" />
 
@@ -4283,20 +4374,6 @@ export function EditorShell({
 
               {activeTab === "media" && (
                 <>
-                  <div className="ed-projectline">
-                    <Icon name="folder" className="ed-project-icon" />
-                    <span className="ed-project-name" title={projectName}>
-                      {projectName}
-                    </span>
-                    {isDirty && (
-                      <span
-                        className="ed-dirty"
-                        title="Unsaved changes"
-                        aria-label="Unsaved changes"
-                      />
-                    )}
-                  </div>
-
                   <div className="ed-section-head">
                     <h3 className="ed-section-title">Media</h3>
                   </div>
@@ -4862,101 +4939,108 @@ export function EditorShell({
                   </div>
 
                   <div className="ed-section-head">
-                    <h3 className="ed-section-title">Services</h3>
+                    <h3 className="ed-section-title">Who is listening</h3>
+                  </div>
+                  {/* One place to choose a service, not two. The ears are
+                      picked under AI providers along with the eyes and the
+                      brain, and this reports what was picked rather than
+                      offering a second way to pick it — two lists of the
+                      same thing are two things to keep in agreement. */}
+                  <div className="ed-ears">
+                    <span className="ed-ears-who">
+                      {ears ? `${ears.provider} · ${ears.model}` : "No service chosen yet"}
+                    </span>
+                    <button className="ed-pill" onClick={() => setAiOpen(true)}>
+                      {ears ? "Change" : "Choose"}
+                    </button>
                   </div>
                   <p className="ed-muted ed-note">
-                    A key is a bill, so each service keeps its own. Tick the one
-                    to use; the others stay ready for when it is rate-limited or
-                    out of credit. Keys are kept in this app's settings folder,
-                    never in the project file, so sending someone a project
-                    cannot send them a key.
+                    A key is a bill, so it is kept in this app's settings
+                    folder and never in the project file: sending someone a
+                    project cannot send them a key.
                   </p>
 
-                  <div className="ed-engines">
-                    {speechEngines.map((engine) => {
-                      const typed = typedKeys[engine.id] ?? "";
-                      return (
-                        <div
-                          key={engine.id}
-                          className={`ed-engine ${engine.isDefault ? "is-default" : ""}`}
-                        >
-                          <label className="ed-engine-head">
-                            <input
-                              type="radio"
-                              name="ed-speech-engine"
-                              checked={engine.isDefault}
-                              disabled={!engine.hasKey}
-                              onChange={() => onChooseSpeechEngine(engine.id)}
-                            />
-                            <span className="ed-engine-name">
-                              {engine.provider} · {engine.model}
-                            </span>
-                            <span
-                              className={`ed-engine-state ${engine.hasKey ? "is-set" : ""}`}
-                            >
-                              {engine.hasKey ? "key saved" : "no key"}
-                            </span>
-                          </label>
-                          <p className="ed-engine-note">{engine.note}</p>
-                          <div className="ed-engine-key">
-                            <input
-                              className="ed-input"
-                              type="password"
-                              autoComplete="off"
-                              spellCheck={false}
-                              placeholder={engine.hasKey ? "Replace the key" : "Paste the key"}
-                              value={typed}
-                              onChange={(e) => {
-                                // Read out here, not inside the updater:
-                                // the updater runs after the event has
-                                // been handed back, and by then React has
-                                // emptied it — which took the whole
-                                // editor down on the first keystroke.
-                                const typing = e.currentTarget.value;
-                                setTypedKeys((all) => ({
-                                  ...all,
-                                  [engine.id]: typing,
-                                }));
-                              }}
-                            />
+                  {words.length > 0 && (
+                    <>
+                      <div className="ed-section-head">
+                        <h3 className="ed-section-title">Transcript</h3>
+                      </div>
+                      {/* Editing by transcript: a run of words is a run of
+                          seconds, so taking the words out takes the
+                          seconds with them and closes the gap. Click a
+                          word to begin, click another to end. */}
+                      <p className="ed-muted ed-note">
+                        Click a word, then another, to pick a run. Removing it
+                        takes that stretch out of the film and closes the gap.
+                      </p>
+                      <div className="ed-transcript">
+                        {words.map((word, index) => {
+                          const inRun =
+                            pickedWords != null &&
+                            index >= pickedWords.from &&
+                            index <= pickedWords.to;
+                          return (
                             <button
-                              className="ed-pill"
-                              disabled={typed.trim().length === 0}
+                              key={`${word.clipId}-${index}`}
+                              className={`ed-word ${inRun ? "is-picked" : ""}`}
+                              title={formatTimecode(word.start)}
                               onClick={() => {
-                                onSaveSpeechKey(engine.id, typed.trim());
-                                setTypedKeys((all) => ({ ...all, [engine.id]: "" }));
+                                setPickedWords((current) => {
+                                  // No run yet, or one already finished:
+                                  // this click begins a new one.
+                                  if (current == null || current.from !== current.to) {
+                                    return { from: index, to: index };
+                                  }
+                                  // Clicking the same word again lets go.
+                                  if (current.from === index) return null;
+                                  return current.from < index
+                                    ? { from: current.from, to: index }
+                                    : { from: index, to: current.from };
+                                });
+                                scrubTo(word.start);
                               }}
                             >
-                              Save
+                              {word.word}
                             </button>
-                            {engine.hasKey && (
-                              <button
-                                className="ed-pill"
-                                title="Forget this key"
-                                onClick={() => {
-                                  onSaveSpeechKey(engine.id, "");
-                                  setTypedKeys((all) => ({ ...all, [engine.id]: "" }));
-                                }}
-                              >
-                                Clear
-                              </button>
-                            )}
-                          </div>
+                          );
+                        })}
+                      </div>
+                      {pickedWords != null && (
+                        <div className="ed-transcript-go">
+                          <span className="ed-muted">
+                            {(() => {
+                              const from = words[pickedWords.from].start;
+                              const to = words[pickedWords.to].end;
+                              const many = pickedWords.to - pickedWords.from + 1;
+                              return `${many} word${many === 1 ? "" : "s"} · ${(to - from).toFixed(1)}s`;
+                            })()}
+                          </span>
                           <button
-                            className="ed-engine-link"
-                            title={engine.keysAt}
+                            className="ed-pill"
+                            onClick={() => setPickedWords(null)}
+                          >
+                            Clear
+                          </button>
+                          <button
+                            className="ed-pill ed-pill-primary"
                             onClick={() => {
-                              void openUrl(engine.keysAt).catch(() =>
-                                setToast(engine.keysAt),
-                              );
+                              const from = words[pickedWords.from].start;
+                              const to = words[pickedWords.to].end;
+                              if (onRemoveSpan(from, to)) {
+                                setPickedWords(null);
+                                setToast(
+                                  `Removed ${(to - from).toFixed(1)}s of the film.`,
+                                );
+                              }
                             }}
                           >
-                            Where to get a key
+                            <Icon name="scissors" />
+                            <span>Remove</span>
                           </button>
                         </div>
-                      );
-                    })}
-                  </div>
+                      )}
+                    </>
+                  )}
 
                   {captionError && (
                     <div className="ed-missing" role="alert">
@@ -4966,7 +5050,7 @@ export function EditorShell({
 
                   <button
                     className="ed-pill ed-pill-primary ed-caption-go"
-                    disabled={captionRun != null || !speechEngines.some((e) => e.isDefault)}
+                    disabled={captionRun != null || ears == null}
                     onClick={() => onAutoCaption(captionLanguage, captionWords)}
                   >
                     <Icon name="wand" />
@@ -6194,6 +6278,15 @@ Right-click for audio options`}
             </button>
           </div>
         </div>
+      )}
+
+      {aiOpen && (
+        <AiSettings
+          onClose={() => {
+            setAiOpen(false);
+            onRefreshSpeechEngines();
+          }}
+        />
       )}
 
       {/* A file, played where it cannot be mistaken for the edit.

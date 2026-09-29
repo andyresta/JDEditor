@@ -13,7 +13,6 @@
 //! cannot be split back down into that afterwards. A service that will not
 //! time individual words does not belong on this list.
 
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -165,6 +164,33 @@ pub struct Caption {
     pub text: String,
 }
 
+/// One word, timed against the edit rather than against the file.
+///
+/// The services return a time for every word, and until now those times
+/// were used to group the words into captions and then dropped. They are
+/// the one thing transcript-driven editing cannot be built without - to
+/// cut "erm" out of a take you have to know exactly when "erm" was said -
+/// so they are carried back out alongside the captions they made.
+///
+/// `start` and `end` are seconds on the timeline, mapped the same way a
+/// caption's are, so a word can be handed straight to an edit.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimedWord {
+    pub clip_id: String,
+    pub word: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+/// Captions to lay on the timeline, and the words they were made from.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionResult {
+    pub captions: Vec<Caption>,
+    pub words: Vec<TimedWord>,
+}
+
 /// Where the work has got to. Sent as it goes, because transcribing an
 /// hour of speech is not a thing to do behind a still screen.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -207,13 +233,45 @@ const SHORTEST: f64 = 0.4;
 /// The rules are about reading rather than about grammar: enough words to
 /// be worth a glance, few enough to take in at one, and a break wherever
 /// the speaker themselves left one.
+/// Where a moment in the extracted audio falls on the timeline.
+///
+/// The audio was cut at the clip's in-point, so a word's time is measured
+/// from there; on the timeline it is divided by the speed and laid after
+/// the clip's own start.
+///
+/// A free function rather than a closure inside the grouping, because the
+/// words are now mapped in two places and two copies of this arithmetic
+/// would be two chances to disagree about when something was said.
+fn timeline_at(job: &CaptionJob, at: f64) -> f64 {
+    let speed = if job.speed > 0.0 { job.speed } else { 1.0 };
+    job.start + at / speed
+}
+
+/// Every word, placed on the timeline and clipped to what is actually
+/// heard there. A word timed past the clip's out-point was cut away by
+/// the edit and never reaches an ear, so it is not reported.
+pub fn timed_words(words: &[Word], job: &CaptionJob) -> Vec<TimedWord> {
+    let ends = job.start + job.duration;
+    let mut out = Vec::new();
+    for word in words {
+        let from = timeline_at(job, word.start).max(job.start);
+        let to = timeline_at(job, word.end).min(ends);
+        if from >= ends || to <= from || word.word.trim().is_empty() {
+            continue;
+        }
+        out.push(TimedWord {
+            clip_id: job.clip_id.clone(),
+            word: word.word.trim().to_string(),
+            start: from,
+            end: to,
+        });
+    }
+    out
+}
+
 pub fn into_captions(words: &[Word], job: &CaptionJob, per: usize) -> Vec<Caption> {
     let per = per.max(1);
-    let speed = if job.speed > 0.0 { job.speed } else { 1.0 };
-    // The audio was cut at the clip's in-point, so a word's time is
-    // measured from there; on the timeline it is divided by the speed and
-    // laid after the clip's own start.
-    let onto = |at: f64| job.start + at / speed;
+    let onto = |at: f64| timeline_at(job, at);
     let ends = job.start + job.duration;
 
     let mut out: Vec<Caption> = Vec::new();
@@ -669,129 +727,56 @@ fn read_words(wire: Wire, body: &str) -> Result<Vec<Word>, serde_json::Error> {
 
 /* ----------------------------------------------------------- the keys */
 
-/// What the editor has been given: a key per engine, and which one to use.
-///
-/// Kept in the app's own config folder rather than in the project. A
-/// project file is a thing people send each other; a key is not, and the
-/// two must not be able to travel together.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct Keyring {
-    /// The engine marked for use. Empty until one is chosen.
-    #[serde(default)]
-    default: String,
-    /// Engine id to key.
-    #[serde(default)]
-    keys: BTreeMap<String, String>,
-}
-
-fn keyring_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("speech.json"))
-}
-
-fn read_keyring(app: &tauri::AppHandle) -> Keyring {
-    keyring_file(app)
-        .ok()
-        .and_then(|f| std::fs::read_to_string(f).ok())
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
-}
-
-fn write_keyring(app: &tauri::AppHandle, ring: &Keyring) -> Result<(), String> {
-    let file = keyring_file(app)?;
-    let text = serde_json::to_string_pretty(ring).map_err(|e| e.to_string())?;
-    // Written beside itself and moved into place, so an interrupted write
-    // cannot leave the keys half-there.
-    let part = file.with_extension("json.part");
-    std::fs::write(&part, text).map_err(|e| e.to_string())?;
-    std::fs::rename(&part, &file).map_err(|e| e.to_string())
-}
-
-/// Puts a key in for one engine, or takes it away when given nothing.
-///
-/// Setting the first key also marks that engine for use: someone who has
-/// entered exactly one key has said which one they mean.
-pub fn save_key(app: &tauri::AppHandle, id: &str, key: &str) -> Result<(), String> {
-    if engine(id).is_none() {
-        return Err(format!("There is no transcription service called {id}."));
-    }
-    let mut ring = read_keyring(app);
-    let key = key.trim();
-    if key.is_empty() {
-        ring.keys.remove(id);
-        if ring.default == id {
-            ring.default = ring.keys.keys().next().cloned().unwrap_or_default();
-        }
-    } else {
-        ring.keys.insert(id.to_string(), key.to_string());
-        if ring.default.is_empty() {
-            ring.default = id.to_string();
-        }
-    }
-    write_keyring(app, &ring)
-}
-
-/// Marks one engine as the one to use.
-pub fn choose(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
-    if engine(id).is_none() {
-        return Err(format!("There is no transcription service called {id}."));
-    }
-    let mut ring = read_keyring(app);
-    ring.default = id.to_string();
-    write_keyring(app, &ring)
-}
-
 /// The list the editor shows: every engine, whether it has a key, and
 /// which one is marked. Never a key.
 pub fn engines(app: &tauri::AppHandle) -> Vec<EngineInfo> {
-    let ring = read_keyring(app);
+    // Read through the provider registry rather than from a keyring of
+    // this module's own. Whoever is paying holds one key per provider,
+    // and captions are only one of the three things that key buys.
+    let known = crate::providers::models(app);
     ENGINES
         .iter()
-        .map(|e| EngineInfo {
-            id: e.id.to_string(),
-            provider: e.provider.to_string(),
-            model: e.model.to_string(),
-            note: e.note.to_string(),
-            keys_at: e.keys_at.to_string(),
-            has_key: ring.keys.get(e.id).map(|k| !k.is_empty()).unwrap_or(false),
-            is_default: ring.default == e.id,
+        .map(|e| {
+            let seen = known.iter().find(|m| m.id == e.id);
+            EngineInfo {
+                id: e.id.to_string(),
+                provider: e.provider.to_string(),
+                model: e.model.to_string(),
+                note: e.note.to_string(),
+                keys_at: e.keys_at.to_string(),
+                has_key: seen.map(|m| m.has_key).unwrap_or(false),
+                is_default: seen
+                    .map(|m| m.chosen_for.contains(&crate::providers::Role::Ears))
+                    .unwrap_or(false),
+            }
         })
         .collect()
 }
 
 /// The engine to use and its key, or a plain account of what is missing.
 fn chosen(app: &tauri::AppHandle, asked: &str) -> Result<(&'static Engine, String), String> {
-    let ring = read_keyring(app);
     let id = if asked.trim().is_empty() {
-        ring.default.clone()
+        crate::providers::chosen(app, crate::providers::Role::Ears).unwrap_or_default()
     } else {
         asked.trim().to_string()
     };
     if id.is_empty() {
         return Err(
-            "No transcription service has been set up yet — add a key under Captions.".to_string(),
+            "No transcription service has been chosen yet — pick one for the ears under AI providers."
+                .to_string(),
         );
     }
-    let engine = engine(&id).ok_or_else(|| format!("There is no transcription service called {id}."))?;
-    let key = ring
-        .keys
-        .get(&id)
-        .map(|k| k.trim().to_string())
-        .filter(|k| !k.is_empty())
-        .ok_or_else(|| {
-            format!(
-                "{} · {} has no key yet — add one under Captions.",
-                engine.provider, engine.model
-            )
-        })?;
+    let engine =
+        engine(&id).ok_or_else(|| format!("There is no transcription service called {id}."))?;
+    // The key belongs to the provider, not to this one model of theirs.
+    let key = crate::providers::key_for(app, crate::providers::provider_id_of(engine.provider))?;
     Ok((engine, key))
 }
 
 /* ------------------------------------------------------------ the work */
 
 /// Listens to every clip asked about and answers with captions.
-pub fn run(app: &tauri::AppHandle, request: CaptionRequest) -> Result<Vec<Caption>, String> {
+pub fn run(app: &tauri::AppHandle, request: CaptionRequest) -> Result<CaptionResult, String> {
     if request.jobs.is_empty() {
         return Err("There is nothing on the timeline to listen to.".to_string());
     }
@@ -807,6 +792,7 @@ pub fn run(app: &tauri::AppHandle, request: CaptionRequest) -> Result<Vec<Captio
     let told = format!("{} · {}", engine.provider, engine.model);
     let total = request.jobs.len();
     let mut captions: Vec<Caption> = Vec::new();
+    let mut words_out: Vec<TimedWord> = Vec::new();
     for (index, job) in request.jobs.iter().enumerate() {
         let _ = app.emit(
             "caption-progress",
@@ -818,6 +804,7 @@ pub fn run(app: &tauri::AppHandle, request: CaptionRequest) -> Result<Vec<Captio
             },
         );
         let words = listen(&directory, job, &request.language, engine, &key)?;
+        words_out.extend(timed_words(&words, job));
         captions.extend(into_captions(&words, job, request.words_per_caption));
     }
     let _ = app.emit(
@@ -840,12 +827,74 @@ pub fn run(app: &tauri::AppHandle, request: CaptionRequest) -> Result<Vec<Captio
             "Nothing was said in those clips, or the speech was too quiet to make out.".to_string(),
         );
     }
-    Ok(captions)
+    // In the order they were heard, so a caller stepping through the
+    // transcript walks the film forwards.
+    words_out.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(CaptionResult {
+        captions,
+        words: words_out,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The words handed out have to land where the captions made from
+    /// them land. If these two ever disagree, an edit made from the
+    /// transcript would cut somewhere other than where the caption on
+    /// screen says the words are.
+    #[test]
+    fn words_and_captions_agree_about_when_things_were_said() {
+        for speed in [0.5, 1.0, 2.0] {
+            let mut j = job();
+            j.speed = speed;
+            j.start = 4.0;
+            j.duration = 30.0;
+            let heard = words(&[("Hello", 0.0, 0.4), ("there", 0.45, 0.9), ("friend", 1.0, 1.5)]);
+
+            let timed = timed_words(&heard, &j);
+            let captions = into_captions(&heard, &j, 99);
+            assert_eq!(timed.len(), 3, "speed {speed}");
+            assert_eq!(captions.len(), 1, "speed {speed}");
+
+            // The caption spans its first word's start to its last word's
+            // end, so the two views of the same speech must line up.
+            assert!(
+                (timed[0].start - captions[0].start).abs() < 1e-9,
+                "speed {speed}: word {} vs caption {}",
+                timed[0].start,
+                captions[0].start
+            );
+            let caption_ends = captions[0].start + captions[0].duration;
+            assert!(
+                (timed[2].end - caption_ends).abs() < 1e-9,
+                "speed {speed}: word {} vs caption {caption_ends}",
+                timed[2].end
+            );
+            // And every word is inside the clip it came from.
+            for w in &timed {
+                assert!(w.start >= j.start - 1e-9 && w.end <= j.start + j.duration + 1e-9);
+                assert_eq!(w.clip_id, j.clip_id);
+            }
+        }
+    }
+
+    /// Words the edit cut away were never heard, so they are not reported.
+    #[test]
+    fn words_past_the_out_point_are_left_out() {
+        let mut j = job();
+        j.start = 0.0;
+        j.duration = 1.0;
+        let heard = words(&[("kept", 0.1, 0.5), ("trimmed", 2.0, 2.4)]);
+        let timed = timed_words(&heard, &j);
+        assert_eq!(timed.len(), 1);
+        assert_eq!(timed[0].word, "kept");
+    }
 
     fn job() -> CaptionJob {
         CaptionJob {

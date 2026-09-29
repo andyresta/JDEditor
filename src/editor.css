@@ -61,37 +61,40 @@
   -webkit-font-smoothing: antialiased;
 }
 
-@media (prefers-color-scheme: dark) {
-  .ed-shell {
-    --ed-bg: #0e1712;
-    --ed-surface: #15211a;
-    --ed-surface-2: #1b2a22;
-    --ed-surface-3: #23352a;
-    --ed-border: #2a3e33;
-    --ed-border-strong: #395143;
-    --ed-text: #edf7f1;
-    --ed-text-dim: #9ab4a6;
-    --ed-text-faint: #6d897a;
-    --ed-accent: #2bd873;
-    --ed-accent-hover: #4bea8c;
-    --ed-accent-soft: #113222;
-    --ed-dark: #edf7f1;
-    --ed-dark-hover: #d6e6dc;
-    --ed-on-dark: #0f1a14;
-    --ed-track-empty: #1c2a22;
-    --ed-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --ed-shadow-md: 0 8px 22px rgba(0, 0, 0, 0.45);
-    --ed-checker-a: #141d17;
-    --ed-checker-b: #1a241e;
-    --ed-note: #f2c033;
-    --ed-note-edge: #8a6a10;
-    --ed-note-ink: #241b00;
-    --ed-frame-ring: rgba(0, 0, 0, 0.9);
-    --ed-frame-ring-out: rgba(237, 247, 241, 0.5);
-    --ed-frame-lift: 0 12px 32px rgba(0, 0, 0, 0.6);
-    --ed-playhead: #f87171;
-    --ed-audio: #6ea8ff;
-  }
+/* Dark. Keyed off the theme the app resolved rather than
+   `prefers-color-scheme` directly, so the same values serve both "follow
+   the system" and a theme the user picked by hand — see src/theme.ts,
+   which writes `data-theme` onto <html> before the first paint. One copy
+   of these values, not two that can drift apart. */
+:root[data-theme="dark"] .ed-shell {
+  --ed-bg: #0e1712;
+  --ed-surface: #15211a;
+  --ed-surface-2: #1b2a22;
+  --ed-surface-3: #23352a;
+  --ed-border: #2a3e33;
+  --ed-border-strong: #395143;
+  --ed-text: #edf7f1;
+  --ed-text-dim: #9ab4a6;
+  --ed-text-faint: #6d897a;
+  --ed-accent: #2bd873;
+  --ed-accent-hover: #4bea8c;
+  --ed-accent-soft: #113222;
+  --ed-dark: #edf7f1;
+  --ed-dark-hover: #d6e6dc;
+  --ed-on-dark: #0f1a14;
+  --ed-track-empty: #1c2a22;
+  --ed-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --ed-shadow-md: 0 8px 22px rgba(0, 0, 0, 0.45);
+  --ed-checker-a: #141d17;
+  --ed-checker-b: #1a241e;
+  --ed-note: #f2c033;
+  --ed-note-edge: #8a6a10;
+  --ed-note-ink: #241b00;
+  --ed-frame-ring: rgba(0, 0, 0, 0.9);
+  --ed-frame-ring-out: rgba(237, 247, 241, 0.5);
+  --ed-frame-lift: 0 12px 32px rgba(0, 0, 0, 0.6);
+  --ed-playhead: #f87171;
+  --ed-audio: #6ea8ff;
 }
 
 /* --------------------------------------------------------- shared atoms */
@@ -911,39 +914,7 @@ body.ed-resizing-cols {
   margin: 0;
 }
 
-/* ------------------------------------------- project line + media lists */
-
-/* The open project's name lives here now rather than in the top bar. */
-.ed-shell .ed-projectline {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  margin: 0 0 14px;
-  padding: 0 0 12px;
-  border-bottom: 1px solid var(--ed-border);
-}
-
-.ed-shell .ed-project-icon {
-  color: var(--ed-text-dim);
-}
-
-.ed-shell .ed-project-name {
-  min-width: 0;
-  font-weight: 600;
-  font-size: 13px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ed-shell .ed-dirty {
-  flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--ed-accent);
-}
+/* ------------------------------------------------------------ media lists */
 
 .ed-shell .ed-medialist {
   display: flex;
@@ -1983,9 +1954,20 @@ body.ed-resizing-cols {
 }
 
 /* The block of track rows, measured so the playhead knows where the last
-   of them ends however tall each has been dragged. */
+   of them ends however tall each has been dragged.
+
+   `flow-root` is load-bearing. Each row carries a 6px top margin, and the
+   first row's escaped through the top of this block — margins collapse
+   out of a plain block container — which pushed this box 6px down from
+   the foot of the ruler. The playhead hangs from `top: 0` of this box, so
+   it started 6px below where the ruler ends: the head sat against the
+   ruler, the line began below the gap, and the white strip between them
+   read as the line being buried under the panel. A flow root keeps the
+   margin inside, so the box starts where the ruler ends and the line
+   meets its own head. */
 .ed-shell .ed-tracks {
   position: relative;
+  display: flow-root;
 }
 
 /* The gap above each row, filled in.
@@ -2167,10 +2149,13 @@ body.ed-resizing-cols {
 
 /* The light-theme wash is mixed for a white lane; on the dark theme the
    same fill would disappear into it. */
-@media (prefers-color-scheme: dark) {
-  .ed-shell .ed-dropmark {
-    background: rgba(43, 216, 115, 0.22);
-  }
+/* Dark. Keyed off the theme the app resolved rather than
+   `prefers-color-scheme` directly, so the same values serve both "follow
+   the system" and a theme the user picked by hand — see src/theme.ts,
+   which writes `data-theme` onto <html> before the first paint. One copy
+   of these values, not two that can drift apart. */
+:root[data-theme="dark"] .ed-shell .ed-dropmark {
+  background: rgba(43, 216, 115, 0.22);
 }
 
 .ed-shell .ed-dropmark-time {
@@ -2396,21 +2381,25 @@ body.ed-resizing-cols {
 /* Amber, and the only thing on the timeline that colour: a dark line on a
    green clip with a pale waveform behind it was there but easy to miss,
    and a control nobody can see is a control nobody can use. The dark halo
-   keeps it legible over the brightest part of a waveform. */
+   keeps it legible over the brightest part of a waveform, which is what
+   lets the line itself stay hairline-thin: contrast is doing the work
+   that width used to do. */
 .ed-shell .ed-clip-volume-line {
   fill: none;
   stroke: #ffc83d;
-  stroke-width: 2.5;
+  stroke-width: 1.25;
   stroke-linejoin: round;
   stroke-linecap: round;
   vector-effect: non-scaling-stroke;
   pointer-events: none;
-  filter: drop-shadow(0 0 2px rgba(6, 32, 18, 0.85));
+  filter: drop-shadow(0 0 1.5px rgba(6, 32, 18, 0.9));
 }
 
-/* Visibly a handle while the pointer is on it. */
+/* Visibly a handle while the pointer is on it. Thickening on hover
+   matters more now that the resting line is thin: it is how the line
+   says it can be grabbed. */
 .ed-shell .ed-clip-volume:hover .ed-clip-volume-line {
-  stroke-width: 3.5;
+  stroke-width: 2.25;
 }
 
 /* The line at 0 dB — the level the clip was recorded at — so it is plain
@@ -2433,12 +2422,12 @@ body.ed-resizing-cols {
 
 .ed-shell .ed-clip-volume-knob {
   position: absolute;
-  width: 10px;
-  height: 10px;
-  margin: -5px 0 0 -5px;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
   border-radius: 50%;
   background: #ffc83d;
-  border: 1.5px solid rgba(6, 32, 18, 0.85);
+  border: 1.25px solid rgba(6, 32, 18, 0.85);
   box-shadow: 0 1px 3px rgba(6, 40, 22, 0.5);
   pointer-events: auto;
   cursor: grab;
@@ -2883,6 +2872,149 @@ body.ed-resizing-cols {
   background-repeat: no-repeat;
 }
 
+/* ---------------------------------------------------------- transcript */
+
+/* Words as they were said, laid out as running text rather than as a
+   list: reading back a take is reading, and a column of one word per row
+   is not something anyone can read. */
+.ed-shell .ed-transcript {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-top: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+  line-height: 1.7;
+}
+
+.ed-shell .ed-word {
+  padding: 1px 3px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.ed-shell .ed-word:hover {
+  background: var(--ed-surface-3);
+}
+
+/* The run about to be taken out, marked plainly: this is a destructive
+   button's worth of selection and it should not be possible to press
+   Remove without knowing exactly what goes. */
+.ed-shell .ed-word.is-picked {
+  background: var(--ed-accent);
+  color: var(--ed-on-dark);
+}
+
+.ed-shell .ed-transcript-go {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ed-shell .ed-transcript-go .ed-muted {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+}
+
+/* ------------------------------------------------------- AI providers */
+
+/* Wider than the ordinary box: three role pickers and a card per
+   provider do not read well in a column the width of a speed dial. */
+.ed-shell .ed-modal.ed-ai {
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+}
+
+.ed-shell .ed-ai-heading {
+  margin: 18px 0 0;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.ed-shell .ed-ai-error {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  background: rgba(220, 38, 38, 0.12);
+  color: #f87171;
+}
+
+.ed-shell .ed-roles {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* One job: what it is called, who is doing it, and what it is for. */
+.ed-shell .ed-role {
+  padding: 10px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+}
+
+.ed-shell .ed-role-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ed-shell .ed-role-name {
+  flex: none;
+  width: 54px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.ed-shell .ed-role-pick {
+  flex: 1;
+  min-width: 0;
+}
+
+.ed-shell .ed-role-what {
+  margin: 7px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ed-text-dim);
+}
+
+/* Who the ears are, reported rather than chosen: the choosing happens
+   under AI providers, along with the eyes and the brain. */
+.ed-shell .ed-ears {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+}
+
+.ed-shell .ed-ears-who {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .ed-shell .ed-engines {
   display: flex;
   flex-direction: column;
@@ -3053,22 +3185,25 @@ body.ed-resizing-cols {
   background: #fdeaea;
 }
 
-@media (prefers-color-scheme: dark) {
-  .ed-shell .ed-missing {
-    border-color: #6d3030;
-    background: #2a1717;
-    color: #f3bcbc;
-  }
-  .ed-shell .ed-mediarow.is-missing {
-    border-color: #6d3030;
-    background: #241515;
-  }
-  .ed-shell .ed-mediarow.is-missing .ed-mediarow-meta {
-    color: #e79a9a;
-  }
-  .ed-shell .ed-mediarow-find {
-    border-color: #7a3a3a;
-    background: #351d1d;
-    color: #f3bcbc;
-  }
+/* Dark. Keyed off the theme the app resolved rather than
+   `prefers-color-scheme` directly, so the same values serve both "follow
+   the system" and a theme the user picked by hand — see src/theme.ts,
+   which writes `data-theme` onto <html> before the first paint. One copy
+   of these values, not two that can drift apart. */
+:root[data-theme="dark"] .ed-shell .ed-missing {
+  border-color: #6d3030;
+  background: #2a1717;
+  color: #f3bcbc;
+}
+:root[data-theme="dark"] .ed-shell .ed-mediarow.is-missing {
+  border-color: #6d3030;
+  background: #241515;
+}
+:root[data-theme="dark"] .ed-shell .ed-mediarow.is-missing .ed-mediarow-meta {
+  color: #e79a9a;
+}
+:root[data-theme="dark"] .ed-shell .ed-mediarow-find {
+  border-color: #7a3a3a;
+  background: #351d1d;
+  color: #f3bcbc;
 }

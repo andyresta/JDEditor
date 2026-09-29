@@ -1,17 +1,83 @@
 :root {
+  /* One palette for the launcher, the recorder, the floating bar, the
+     area picker and the export box - the same job `.ed-shell` does for
+     the editor.
+
+     Written as tokens rather than as colours in place. Dark used to be a
+     short `prefers-color-scheme` block that reached a handful of
+     selectors, so the buttons went dark while every panel around them
+     stayed pale: half the screen in one theme and half in the other.
+     With the colours named, dark is a second set of values rather than a
+     second copy of the stylesheet, and nothing can be left behind. */
+  --app-bg: #f4f5f7;
+  --app-surface: #ffffff;
+  /* The soft green fills: a selected option, a toggle at rest, the
+     floating bar's own buttons. */
+  --app-surface-2: #e9f4ed;
+  --app-surface-3: #dcebe2;
+  --app-border: #d3e7da;
+  --app-border-2: #c3dfcd;
+  --app-text: #16181d;
+  --app-text-dim: #4b5563;
+  --app-text-soft: #6b7280;
+  --app-text-faint: #9ca3af;
+  --app-accent: #0fa958;
+  --app-accent-hover: #0c8f4a;
+  /* Accent-coloured *text*, darker than the accent itself so it stays
+     readable on a pale green fill. */
+  --app-accent-ink: #0b7a41;
+  --app-accent-weak: #8fcfab;
+  --app-on-accent: #ffffff;
+  --app-danger: #dc2626;
+  --app-danger-bg: #fef2f2;
+  --app-danger-edge: #fecaca;
+  --app-danger-ink: #991b1b;
+  --app-window: linear-gradient(180deg, #f6fcf8 0%, #e4f3ea 100%);
+  --app-lift: rgba(0, 0, 0, 0.06);
+
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 15px;
   line-height: 1.5;
   font-weight: 400;
 
-  color: #16181d;
-  background-color: #f4f5f7;
+  color: var(--app-text);
+  background-color: var(--app-bg);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   -webkit-text-size-adjust: 100%;
+}
+
+/* The same palette after dark. Only these values differ - not one rule
+   below is repeated, which is what keeps the two themes in step.
+
+   Keyed off the attribute the app resolves rather than
+   `prefers-color-scheme`, so it serves both "follow the system" and a
+   theme chosen by hand. See src/theme.ts. */
+:root[data-theme="dark"] {
+  --app-bg: #14161a;
+  --app-surface: #1e2126;
+  --app-surface-2: #202a24;
+  --app-surface-3: #27332c;
+  --app-border: #2f3b34;
+  --app-border-2: #3b4a41;
+  --app-text: #edf2ee;
+  --app-text-dim: #a9bdb1;
+  --app-text-soft: #93a89a;
+  --app-text-faint: #74887c;
+  --app-accent: #21c168;
+  --app-accent-hover: #37d97e;
+  --app-accent-ink: #7ceaad;
+  --app-accent-weak: #2c5d42;
+  --app-on-accent: #07130c;
+  --app-danger: #f87171;
+  --app-danger-bg: #3a1a1a;
+  --app-danger-edge: #5c2626;
+  --app-danger-ink: #fca5a5;
+  --app-window: linear-gradient(180deg, #171b19 0%, #10150f 100%);
+  --app-lift: rgba(255, 255, 255, 0.08);
 }
 
 * {
@@ -40,7 +106,7 @@ body {
 
 .subtitle {
   margin: 0.25rem 0 0;
-  color: #6b7280;
+  color: var(--app-text-soft);
   font-size: 0.9rem;
 }
 
@@ -51,6 +117,7 @@ body {
 
 /* Launcher (Record / Editor choice) screen */
 .launcher {
+  position: relative;
   height: 100vh;
   width: 100vw;
   display: flex;
@@ -60,6 +127,31 @@ body {
   gap: 2.5rem;
   text-align: center;
   padding: 1.5rem;
+}
+
+/* The theme switch on the launcher, tucked into a corner: it is not one
+   of the two things this screen is asking, just something to reach for
+   when the room is dark. */
+.launcher-theme {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text-dim);
+  opacity: 0.6;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.launcher-theme:hover {
+  opacity: 1;
+  background: var(--app-lift);
 }
 
 .launcher-header h1 {
@@ -82,14 +174,14 @@ body {
   width: 14rem;
   padding: 2rem 1.5rem;
   border-radius: 16px;
-  border: 1px solid #e5e7eb;
-  background: #ffffff;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface);
   box-shadow: 0 2px 2px rgba(0, 0, 0, 0.05);
   transition: transform 0.15s, box-shadow 0.15s;
 }
 
 .launcher-card:hover {
-  border-color: #0fa958;
+  border-color: var(--app-accent);
   transform: translateY(-2px);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.08);
 }
@@ -105,12 +197,12 @@ body {
 
 .launcher-card-desc {
   font-size: 0.82rem;
-  color: #6b7280;
+  color: var(--app-text-soft);
 }
 
 .panel {
-  background: #ffffff;
-  border: 1px solid #e5e7eb;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 12px;
   padding: 1rem 1.25rem;
   margin-bottom: 1rem;
@@ -121,7 +213,7 @@ body {
   font-size: 0.95rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #6b7280;
+  color: var(--app-text-soft);
 }
 
 .field {
@@ -162,12 +254,12 @@ body {
 select,
 button {
   border-radius: 8px;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--app-border);
   padding: 0.5em 0.8em;
   font-size: 0.95em;
   font-family: inherit;
-  color: #16181d;
-  background-color: #ffffff;
+  color: var(--app-text);
+  background-color: var(--app-surface);
 }
 
 select {
@@ -177,12 +269,12 @@ select {
 
 button {
   cursor: pointer;
-  border-color: #c7cad1;
+  border-color: var(--app-border-2);
   font-weight: 500;
 }
 
 button:hover:not(:disabled) {
-  border-color: #0fa958;
+  border-color: var(--app-accent);
 }
 
 button:disabled {
@@ -194,12 +286,12 @@ button.link-button {
   border: none;
   background: transparent;
   box-shadow: none;
-  color: #0fa958;
+  color: var(--app-accent);
   padding: 0.2em 0.4em;
 }
 
 button.danger {
-  color: #b42318;
+  color: var(--app-danger-ink);
 }
 
 .area-controls {
@@ -211,7 +303,7 @@ button.danger {
 
 .area-summary {
   font-size: 0.9rem;
-  color: #4b5563;
+  color: var(--app-text-dim);
   min-width: 8rem;
 }
 
@@ -236,7 +328,7 @@ button.danger {
 .last-output {
   margin: 0.6rem 0 0;
   font-size: 0.82rem;
-  color: #6b7280;
+  color: var(--app-text-soft);
   word-break: break-all;
 }
 
@@ -248,13 +340,13 @@ button.danger {
 }
 
 .banner-error {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: #991b1b;
+  background: var(--app-danger-bg);
+  border: 1px solid var(--app-danger-edge);
+  color: var(--app-danger-ink);
 }
 
 .banner-error code {
-  background: #fee2e2;
+  background: var(--app-danger-edge);
   padding: 0.1em 0.4em;
   border-radius: 4px;
 }
@@ -274,7 +366,7 @@ button.danger {
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.5rem 0;
-  border-bottom: 1px solid #f0f1f3;
+  border-bottom: 1px solid var(--app-border);
   flex-wrap: wrap;
 }
 
@@ -295,7 +387,7 @@ button.danger {
 
 .recording-meta {
   font-size: 0.8rem;
-  color: #6b7280;
+  color: var(--app-text-soft);
 }
 
 .recording-actions {
@@ -305,7 +397,7 @@ button.danger {
 }
 
 .empty-hint {
-  color: #6b7280;
+  color: var(--app-text-soft);
   font-size: 0.9rem;
   margin: 0;
 }
@@ -318,8 +410,8 @@ button.danger {
   margin-top: 0.5rem;
   max-height: 12rem;
   overflow: auto;
-  background: #f4f5f7;
-  border: 1px solid #e5e7eb;
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
   border-radius: 8px;
   padding: 0.6rem;
   font-size: 0.75rem;
@@ -660,39 +752,6 @@ button.danger {
   z-index: 30;
 }
 
-@media (prefers-color-scheme: dark) {
-  .editor-shell {
-    background: #1a1b1e;
-  }
-
-  .editor-panel {
-    background: #242529;
-    border-color: #34363b;
-  }
-
-  .editor-timeline {
-    background: #242529;
-    border-color: #34363b;
-  }
-
-  .timeline-track {
-    background: #1a1b1e;
-  }
-
-  .media-list-item {
-    background: #1a1b1e;
-    color: #e5e7eb;
-  }
-
-  .media-thumb-wrap {
-    background: #34363b;
-  }
-
-  .editor-preview {
-    background: #000000;
-  }
-}
-
 /* Windows that float over the desktop (the area selector, the recorder
    bar) have to drop the app-wide page background to actually be
    see-through. */
@@ -712,10 +771,21 @@ html.transparent-window body {
   height: 100vh;
   padding: 0.6rem 1rem 1rem;
   overflow-y: auto;
-  /* Set explicitly: this surface stays light, so it can't inherit the
-     light-on-dark text the app's dark-mode block sets on :root. */
-  color: #16181d;
-  background: linear-gradient(180deg, #f6fcf8 0%, #e4f3ea 100%);
+  color: var(--app-text);
+  background: var(--app-window);
+}
+
+/* Nothing in this column gets squeezed to make the rest fit.
+ *
+ * A flex item shrinks by default, and this column is a fixed 100vh, so
+ * once the contents outgrew the window every child was compressed instead
+ * of the window scrolling: opening the device diagnostics crushed its own
+ * output down to a single line with a scrollbar too short to use, and the
+ * `overflow-y: auto` above had almost nothing left to scroll. Holding
+ * each child at its natural height is what hands the overflow back to the
+ * scroller that was always meant to take it. */
+.capture-window > * {
+  flex: none;
 }
 
 .capture-titlebar {
@@ -736,7 +806,7 @@ html.transparent-window body {
   height: 28px;
   padding: 0;
   font-size: 0.95rem;
-  color: #4b5563;
+  color: var(--app-text-dim);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -761,8 +831,8 @@ html.transparent-window body {
   width: 30px;
   height: 30px;
   border-radius: 50%;
-  border: 3.5px solid #0fa958;
-  background: #fff;
+  border: 3.5px solid var(--app-accent);
+  background: var(--app-surface);
 }
 
 .capture-name {
@@ -774,9 +844,9 @@ html.transparent-window body {
 .capture-badge {
   padding: 2px 8px;
   font-size: 0.72rem;
-  color: #4b5563;
-  background: #fff;
-  border: 1px solid #d3e7da;
+  color: var(--app-text-dim);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 999px;
 }
 
@@ -786,8 +856,8 @@ html.transparent-window body {
   gap: 2px;
   margin-left: auto;
   padding: 3px;
-  background: #fff;
-  border: 1px solid #d3e7da;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 999px;
 }
 
@@ -806,8 +876,8 @@ html.transparent-window body {
 }
 
 .capture-switch-option.selected {
-  background: #e6f7ee;
-  box-shadow: inset 0 0 0 1px #bfe8d0;
+  background: var(--app-surface-2);
+  box-shadow: inset 0 0 0 1px var(--app-border-2);
   cursor: default;
 }
 
@@ -818,9 +888,9 @@ html.transparent-window body {
 .capture-error {
   padding: 0.5rem 0.75rem;
   font-size: 0.8rem;
-  color: #b91c1c;
-  background: #fef2f2;
-  border: 1px solid #fecaca;
+  color: var(--app-danger-ink);
+  background: var(--app-danger-bg);
+  border: 1px solid var(--app-danger-edge);
   border-radius: 10px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -840,16 +910,16 @@ html.transparent-window body {
   justify-content: center;
   gap: 0.3rem;
   padding: 0.9rem 0.5rem;
-  color: #1f2937;
-  background: #fff;
-  border: 1px solid #d3e7da;
+  color: var(--app-text);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 12px;
   cursor: pointer;
   transition: border-color 0.12s, background 0.12s, transform 0.06s;
 }
 
 .capture-mode:hover:not(:disabled):not(.selected) {
-  border-color: #c9c6c0;
+  border-color: var(--app-border-2);
 }
 
 .capture-mode:active:not(:disabled) {
@@ -857,15 +927,15 @@ html.transparent-window body {
 }
 
 .capture-mode.selected {
-  color: #0b7a41;
-  background: #e6f7ee;
-  border-color: #0fa958;
-  box-shadow: inset 0 0 0 1px #0fa958;
+  color: var(--app-accent-ink);
+  background: var(--app-surface-2);
+  border-color: var(--app-accent);
+  box-shadow: inset 0 0 0 1px var(--app-accent);
 }
 
 .capture-mode:disabled {
-  color: #9ca3af;
-  background: #f4faf6;
+  color: var(--app-text-faint);
+  background: var(--app-surface-2);
   cursor: not-allowed;
 }
 
@@ -894,8 +964,8 @@ html.transparent-window body {
   align-items: center;
   gap: 0.55rem;
   padding: 0.5rem 0.6rem 0.5rem 0.7rem;
-  background: #fff;
-  border: 1px solid #d3e7da;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 12px;
 }
 
@@ -910,7 +980,7 @@ html.transparent-window body {
   min-width: 0;
   padding: 2px 4px;
   font-size: 0.84rem;
-  color: #1f2937;
+  color: var(--app-text);
   background: transparent;
   border: none;
   border-radius: 6px;
@@ -918,7 +988,7 @@ html.transparent-window body {
 }
 
 .capture-row-select:disabled {
-  color: #9ca3af;
+  color: var(--app-text-faint);
   cursor: default;
 }
 
@@ -926,7 +996,7 @@ html.transparent-window body {
   flex: 1;
   min-width: 0;
   font-size: 0.84rem;
-  color: #6b7280;
+  color: var(--app-text-soft);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -938,9 +1008,9 @@ html.transparent-window body {
   padding: 4px 12px;
   font-size: 0.78rem;
   font-weight: 600;
-  color: #4b5563;
-  background: #e8f3ec;
-  border: 1px solid #d3e7da;
+  color: var(--app-text-dim);
+  background: var(--app-surface-2);
+  border: 1px solid var(--app-border);
   border-radius: 999px;
   cursor: pointer;
   transition: background 0.12s, color 0.12s, transform 0.06s;
@@ -951,24 +1021,24 @@ html.transparent-window body {
 }
 
 .capture-toggle:hover:not(:disabled) {
-  border-color: #c3dfcd;
+  border-color: var(--app-border-2);
 }
 
 .capture-toggle.on {
-  color: #fff;
-  background: #0fa958;
-  border-color: #0fa958;
+  color: var(--app-on-accent);
+  background: var(--app-accent);
+  border-color: var(--app-accent);
 }
 
 .capture-toggle.on:hover:not(:disabled) {
-  background: #0c8f4a;
-  border-color: #0c8f4a;
+  background: var(--app-accent-hover);
+  border-color: var(--app-accent-hover);
 }
 
 .capture-toggle:disabled,
 .capture-toggle-static {
-  color: #9ca3af;
-  background: #eef6f1;
+  color: var(--app-text-faint);
+  background: var(--app-surface-2);
   cursor: not-allowed;
 }
 
@@ -983,14 +1053,14 @@ html.transparent-window body {
   flex-direction: column;
   gap: 0.25rem;
   font-size: 0.75rem;
-  color: #6b7280;
+  color: var(--app-text-soft);
 }
 
 .capture-settings select {
   padding: 0.4rem 0.5rem;
   font-size: 0.82rem;
-  background: #fff;
-  border: 1px solid #d3e7da;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 9px;
 }
 
@@ -998,8 +1068,8 @@ html.transparent-window body {
   padding: 0.75rem 1rem;
   font-size: 0.95rem;
   font-weight: 600;
-  color: #fff;
-  background: #0fa958;
+  color: var(--app-on-accent);
+  background: var(--app-accent);
   border: none;
   border-radius: 12px;
   cursor: pointer;
@@ -1008,7 +1078,7 @@ html.transparent-window body {
 }
 
 .capture-start:hover:not(:disabled) {
-  background: #0c8f4a;
+  background: var(--app-accent-hover);
 }
 
 /* Pressing it visibly commits — starting the capture devices takes a
@@ -1019,7 +1089,7 @@ html.transparent-window body {
 }
 
 .capture-start:disabled {
-  background: #8fcfab;
+  background: var(--app-accent-weak);
   box-shadow: none;
   cursor: progress;
 }
@@ -1027,7 +1097,7 @@ html.transparent-window body {
 .capture-hint {
   margin: 0;
   font-size: 0.74rem;
-  color: #6b7280;
+  color: var(--app-text-soft);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1039,7 +1109,7 @@ html.transparent-window body {
 
 .capture-recordings summary {
   cursor: pointer;
-  color: #4b5563;
+  color: var(--app-text-dim);
   padding: 0.2rem 0;
 }
 
@@ -1067,9 +1137,9 @@ html.transparent-window body {
   white-space: nowrap;
   /* Any part of the bar that isn't a control drags the window. */
   cursor: grab;
-  color: #1f2937;
-  background: #fff;
-  border: 1px solid #d3e7da;
+  color: var(--app-text);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
 }
 
@@ -1147,7 +1217,7 @@ html.transparent-window body {
   align-items: center;
   gap: 4px;
   padding: 3px 7px 0;
-  color: #374151;
+  color: var(--app-text);
 }
 
 .bar-mic-icon {
@@ -1161,14 +1231,14 @@ html.transparent-window body {
   height: 3px;
   border-radius: 999px;
   overflow: hidden;
-  background: #e5e7eb;
+  background: var(--app-surface-3);
 }
 
 .bar-mic-level-fill {
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: #0fa958;
+  background: var(--app-accent);
   transition: width 70ms linear;
 }
 
@@ -1176,7 +1246,9 @@ html.transparent-window body {
   width: 1px;
   height: 22px;
   margin: 0 2px;
-  background: #d3e7da;
+  /* A hairline: the border colour, even though it is painted as a
+     background. */
+  background: var(--app-border);
 }
 
 .bar-icon-button {
@@ -1186,7 +1258,7 @@ html.transparent-window body {
   width: 30px;
   height: 30px;
   padding: 0;
-  color: #374151;
+  color: var(--app-text);
   background: transparent;
   border: none;
   border-radius: 9px;
@@ -1195,7 +1267,7 @@ html.transparent-window body {
 }
 
 .bar-icon-button:hover:not(:disabled) {
-  background: #f3f4f6;
+  background: var(--app-surface-3);
 }
 
 .bar-icon-button:active:not(:disabled) {
@@ -1203,13 +1275,13 @@ html.transparent-window body {
 }
 
 .bar-icon-button:disabled {
-  color: #9ca3af;
+  color: var(--app-text-faint);
   cursor: default;
 }
 
 .bar-icon-danger:hover:not(:disabled) {
-  color: #dc2626;
-  background: #fef2f2;
+  color: var(--app-danger);
+  background: var(--app-danger-bg);
 }
 
 .bar-grip {
@@ -1217,7 +1289,7 @@ html.transparent-window body {
   align-items: center;
   justify-content: center;
   width: 18px;
-  color: #9ca3af;
+  color: var(--app-text-faint);
   cursor: grab;
   user-select: none;
 }
@@ -1234,17 +1306,17 @@ html.transparent-window body {
   padding: 6px 13px;
   font-size: 0.84rem;
   font-family: inherit;
-  color: #1f2937;
-  background: #e9f4ed;
-  border: 1px solid #d3e7da;
+  color: var(--app-text);
+  background: var(--app-surface-2);
+  border: 1px solid var(--app-border);
   border-radius: 999px;
   cursor: pointer;
   transition: background 0.12s, transform 0.07s, box-shadow 0.12s;
 }
 
 .bar-button:hover:not(:disabled) {
-  background: #dcebe2;
-  border-color: #c3dfcd;
+  background: var(--app-surface-3);
+  border-color: var(--app-border-2);
 }
 
 .bar-button:active:not(:disabled) {
@@ -1253,19 +1325,19 @@ html.transparent-window body {
 }
 
 .bar-button:disabled {
-  color: #9ca3af;
+  color: var(--app-text-faint);
   cursor: default;
 }
 
 .bar-button-primary {
-  color: #fff;
-  background: #0fa958;
-  border-color: #0fa958;
+  color: var(--app-on-accent);
+  background: var(--app-accent);
+  border-color: var(--app-accent);
 }
 
 .bar-button-primary:hover:not(:disabled) {
-  background: #0c8f4a;
-  border-color: #0c8f4a;
+  background: var(--app-accent-hover);
+  border-color: var(--app-accent-hover);
 }
 
 .bar-text {
@@ -1274,7 +1346,7 @@ html.transparent-window body {
   gap: 6px;
   padding: 0 6px;
   font-size: 0.84rem;
-  color: #4b5563;
+  color: var(--app-text-dim);
 }
 
 /* ffmpeg's explanation of a failure runs to several lines, and it's worth
@@ -1320,9 +1392,9 @@ html.transparent-window body {
 .project-modal {
   width: min(420px, calc(100vw - 3rem));
   padding: 1.2rem 1.3rem 1.1rem;
-  color: #10211a;
-  background: #ffffff;
-  border: 1px solid #cae7d6;
+  color: var(--app-text);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 14px;
   box-shadow: 0 18px 48px rgba(6, 40, 22, 0.3);
 }
@@ -1335,7 +1407,7 @@ html.transparent-window body {
 .project-modal p {
   margin: 0 0 1rem;
   font-size: 0.86rem;
-  color: #587264;
+  color: var(--app-text-dim);
   overflow-wrap: anywhere;
 }
 
@@ -1354,13 +1426,13 @@ html.transparent-window body {
 
 .project-modal-primary,
 .project-modal-primary:hover:not(:disabled) {
-  color: #ffffff;
-  background: #0fa958;
-  border-color: #0fa958;
+  color: var(--app-on-accent);
+  background: var(--app-accent);
+  border-color: var(--app-accent);
 }
 
 .project-modal-primary:hover:not(:disabled) {
-  background: #0c8f4a;
+  background: var(--app-accent-hover);
 }
 
 /* Project-level failures (saving, opening) surface over the editor, which
@@ -1470,9 +1542,9 @@ html.transparent-window body {
   gap: 8px;
   cursor: grab;
   padding: 7px 9px;
-  color: #1f2937;
-  background: #fff;
-  border: 1px solid #d3e7da;
+  color: var(--app-text);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 12px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
   white-space: nowrap;
@@ -1480,14 +1552,14 @@ html.transparent-window body {
 
 .area-grip {
   padding: 0 2px;
-  color: #9ca3af;
+  color: var(--app-text-faint);
   user-select: none;
 }
 
 .area-size {
   padding: 0 4px;
   font-size: 0.82rem;
-  color: #4b5563;
+  color: var(--app-text-dim);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1499,14 +1571,14 @@ html.transparent-window body {
 }
 
 .area-confirm {
-  color: #fff;
-  background: #0fa958;
-  border: 1px solid #0fa958;
+  color: var(--app-on-accent);
+  background: var(--app-accent);
+  border: 1px solid var(--app-accent);
 }
 
 .area-confirm:hover {
-  background: #0c8f4a;
-  border-color: #0c8f4a;
+  background: var(--app-accent-hover);
+  border-color: var(--app-accent-hover);
 }
 
 .area-confirm:active {
@@ -1514,14 +1586,14 @@ html.transparent-window body {
 }
 
 .area-cancel {
-  color: #1f2937;
-  background: #e9f4ed;
-  border: 1px solid #d3e7da;
+  color: var(--app-text);
+  background: var(--app-surface-2);
+  border: 1px solid var(--app-border);
 }
 
 .area-cancel:hover {
-  background: #dcebe2;
-  border-color: #c3dfcd;
+  background: var(--app-surface-3);
+  border-color: var(--app-border-2);
 }
 
 .area-hint {
@@ -1531,49 +1603,10 @@ html.transparent-window body {
   transform: translateX(-50%);
   padding: 0.45rem 0.9rem;
   font-size: 0.85rem;
-  color: #fff;
+  color: var(--app-on-accent);
   background: rgba(0, 0, 0, 0.72);
   border-radius: 999px;
   pointer-events: none;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f3f4f6;
-    background-color: #1a1b1e;
-  }
-
-  .panel {
-    background: #242529;
-    border-color: #34363b;
-  }
-
-  select,
-  button {
-    color: #f3f4f6;
-    background-color: #2d2f34;
-    border-color: #46484f;
-  }
-
-  .recording-item {
-    border-bottom-color: #34363b;
-  }
-
-  .debug-output {
-    background: #1a1b1e;
-    border-color: #34363b;
-    color: #d1d5db;
-  }
-
-  .banner-error {
-    background: #3a1a1a;
-    border-color: #5c2626;
-    color: #fca5a5;
-  }
-
-  .banner-error code {
-    background: #4a2020;
-  }
 }
 
 /* ------------------------------------------------------------ exporting */
@@ -1589,13 +1622,13 @@ html.transparent-window body {
   gap: 12px;
   margin: 10px 0;
   font-size: 13px;
-  color: #21402e;
+  color: var(--app-text);
 }
 
 .export-field > span {
   flex: none;
   width: 92px;
-  color: #4a6a58;
+  color: var(--app-text-dim);
 }
 
 .export-field select {
@@ -1603,9 +1636,9 @@ html.transparent-window body {
   min-width: 0;
   padding: 7px 9px;
   border-radius: 8px;
-  border: 1px solid #bcdcc8;
-  background: #ffffff;
-  color: #17301f;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
   font: inherit;
   font-size: 13px;
 }
@@ -1613,15 +1646,15 @@ html.transparent-window body {
 .export-note {
   margin: 14px 0 0;
   font-size: 12.5px;
-  color: #4a6a58;
+  color: var(--app-text-dim);
 }
 
 .export-error {
   margin: 12px 0 0;
   padding: 9px 11px;
   border-radius: 8px;
-  background: #fdecec;
-  color: #8c2020;
+  background: var(--app-danger-bg);
+  color: var(--app-danger-ink);
   font-size: 12.5px;
 }
 
@@ -1637,7 +1670,7 @@ html.transparent-window body {
   height: 8px;
   margin-top: 14px;
   border-radius: 999px;
-  background: #d8ecdf;
+  background: var(--app-surface-3);
   overflow: hidden;
 }
 
@@ -1645,7 +1678,7 @@ html.transparent-window body {
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: #17a05a;
+  background: var(--app-accent);
   transition: width 0.15s linear;
 }
 

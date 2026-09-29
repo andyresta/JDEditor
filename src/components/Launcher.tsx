@@ -1,11 +1,21 @@
+import { useTheme } from "../theme";
+
 interface LauncherProps {
   onSelectRecord: () => void;
   onSelectEditor: () => void;
 }
 
 export function Launcher({ onSelectRecord, onSelectEditor }: LauncherProps) {
+  const { theme, toggle } = useTheme();
   return (
     <main className="launcher">
+      <button
+        className="launcher-theme"
+        onClick={toggle}
+        title={theme === "dark" ? "Switch to light" : "Switch to dark"}
+      >
+        {theme === "dark" ? "☀" : "☾"}
+      </button>
       <div className="launcher-header">
         <h1>JDEditor</h1>
         <p className="subtitle">What would you like to do?</p>
