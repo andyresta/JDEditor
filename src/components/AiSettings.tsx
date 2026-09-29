@@ -38,7 +38,7 @@ export function AiSettings({ onClose }: { onClose: () => void }) {
     void load();
   }, [load]);
 
-  // Escape shuts it, like every other box in this editor.
+  // Escape goes back to the conversation, the way it would shut a box.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -93,20 +93,11 @@ export function AiSettings({ onClose }: { onClose: () => void }) {
   }, []);
 
   return (
-    <div
-      className="ed-modal-backdrop"
-      onPointerDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="ed-modal ed-ai" role="dialog" aria-modal="true" aria-label="AI providers">
-        <div className="ed-modal-head">
-          <h2>AI providers</h2>
-          <button className="ed-iconbtn" title="Close" onClick={onClose}>
-            ✕
-          </button>
-        </div>
-
+    // A page inside the agent's own column rather than a window over the
+    // picture. Choosing who does the thinking belongs next to where the
+    // thinking is asked for, and a box in the middle of the screen made
+    // it feel like a thing apart.
+    <div className="ed-ai" aria-label="AI providers">
         <p className="ed-note">
           Three jobs, chosen separately. A model is only offered for a job it
           can actually do — a chat model cannot hear, however good it is at
@@ -197,7 +188,6 @@ export function AiSettings({ onClose }: { onClose: () => void }) {
         </div>
 
         {models === null && !error && <p className="ed-note">Reading the list…</p>}
-      </div>
     </div>
   );
 }

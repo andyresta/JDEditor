@@ -205,6 +205,14 @@ export interface EditorSettings {
    * property of the film. Absent in projects saved before it could be
    * dragged. */
   inspectorWidth?: number;
+  /** How wide the agent's column is, and whether it is open at all.
+   *
+   * Kept with the project for the same reason the inspector's width is:
+   * how much room the picture gets against how much the controls get is
+   * a working preference. Absent in projects saved before there was a
+   * column to open. */
+  agentWidth?: number;
+  agentOpen?: boolean;
   rounded: number;
   timelineZoom: number;
 }
@@ -217,6 +225,10 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   padding: 36,
   rounded: 14,
   inspectorWidth: 300,
+  agentWidth: 340,
+  // Shut to begin with: an empty column taking a third of the picture is
+  // not what anyone opening a project for the first time is after.
+  agentOpen: false,
   timelineZoom: 25,
 };
 
@@ -1330,7 +1342,12 @@ export function volumePointsOf(clip: TimelineClip): VolumePoint[] {
 
 /** Stamps `soundOnly` on the clips of audio tracks that predate the flag.
  * Without it, an older project's split-off audio — which points at a video
- * file — would be taken for a video clip and start showing a picture. */
+ * file — would be taken for a video clip and start showing a picture.
+ *
+ * A title is never stamped. It has no file behind it and no sound in it,
+ * and marking one as sound sent the editor looking for audio at an empty
+ * path: pressing play then stopped the whole timeline with "nothing here
+ * can decode it". A title on an audio track is still a title. */
 export function withSoundOnlyClips(tracks: TimelineTrack[]): TimelineTrack[] {
   return tracks.map((track) =>
     trackKindOf(track) !== "audio"
@@ -1338,10 +1355,25 @@ export function withSoundOnlyClips(tracks: TimelineTrack[]): TimelineTrack[] {
       : {
           ...track,
           clips: track.clips.map((clip) =>
-            clip.soundOnly === undefined ? { ...clip, soundOnly: true } : clip,
+            clip.soundOnly === undefined && !isTextClip(clip)
+              ? { ...clip, soundOnly: true }
+              : clip,
           ),
         },
   );
+}
+
+/** Whether a clip is heard rather than seen.
+ *
+ * The clip's own nature, not the lane's: a video dragged onto an audio
+ * track is still a video, and the half Split Audio lifted off one stays
+ * sound wherever it is put. A title is neither — it is drawn, not played
+ * — so it is never sound, whatever flag a project may have saved on it.
+ * That last clause is the load-bearing one: projects already written with
+ * a title marked as sound have to open and play. */
+export function isSoundClip(clip: TimelineClip, kind: MediaKind): boolean {
+  if (isTextClip(clip)) return false;
+  return Boolean(clip.soundOnly) || kind === "audio";
 }
 
 export function trackKindOf(track: TimelineTrack): TrackKind {

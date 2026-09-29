@@ -23,6 +23,7 @@ import { frameGeometry } from "../frame";
 import { Launcher } from "./Launcher";
 import { apply as applyOps, type Operation } from "../ops";
 import { quietRanges, totalSeconds } from "../silence";
+import { fillerRuns, fillerSeconds } from "../fillers";
 import { useTheme } from "../theme";
 import { RecordingsList } from "./RecordingsList";
 import {
@@ -1780,6 +1781,40 @@ export function RecorderApp() {
     return true;
   }
 
+  /** Takes every hesitation out of the take.
+   *
+   * The transcript already says what was said and when, so this needs no
+   * model and no key: match the noises, and remove the seconds they were
+   * made in. Every stretch goes in one batch with one entry in the undo
+   * history, because undoing a tidy-up one "um" at a time would be its
+   * own kind of misery.
+   */
+  function handleRemoveFillers(): { runs: number; seconds: number } {
+    const runs = fillerRuns(words);
+    if (runs.length === 0) return { runs: 0, seconds: 0 };
+
+    // Back to front: each cut pulls everything after it backwards, so
+    // working from the end leaves the stretches still to do untouched.
+    const ops: Operation[] = [...runs].reverse().map((run) => ({
+      kind: "removeRange",
+      fromSeconds: run.start,
+      toSeconds: run.end,
+    }));
+
+    const result = applyOps({ tracks, media: projectMedia, notes, words }, ops);
+    if (result.problems.length > 0) {
+      setError(result.problems[0]);
+      return { runs: 0, seconds: 0 };
+    }
+
+    remember("remove-fillers");
+    setTracks(result.doc.tracks);
+    setNotes(result.doc.notes);
+    setWords(result.doc.words);
+    setIsDirty(true);
+    return { runs: runs.length, seconds: fillerSeconds(runs) };
+  }
+
   function handleRemoveClips(clipIds: string[]) {
     if (clipIds.length === 0) return;
     const going = new Set(clipIds);
@@ -2076,6 +2111,7 @@ export function RecorderApp() {
           onRemoveSilences={handleRemoveSilences}
           words={words}
           onRemoveSpan={handleRemoveSpan}
+          onRemoveFillers={handleRemoveFillers}
           onAutoCaption={handleAutoCaption}
           captionRun={captionRun}
           captionError={captionError}

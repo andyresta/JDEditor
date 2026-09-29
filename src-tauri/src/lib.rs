@@ -1,3 +1,4 @@
+mod agent;
 mod bar;
 mod caption;
 mod clips;
@@ -326,6 +327,20 @@ async fn speech_engines(app: tauri::AppHandle) -> Result<Vec<caption::EngineInfo
     blocking(move || Ok(caption::engines(&app))).await?
 }
 
+/// Asks the chosen brain about the project.
+///
+/// Long-running, and deliberately so: the model reads the whole briefing
+/// before it answers. What comes back is a proposal — the operations are
+/// checked and shown for approval in the editor, and nothing is applied
+/// here.
+#[tauri::command]
+async fn ask_agent(
+    app: tauri::AppHandle,
+    ask: agent::AgentAsk,
+) -> Result<agent::AgentReply, String> {
+    blocking(move || agent::ask(&app, ask)).await?
+}
+
 /* ------------------------------------------------------ AI providers */
 
 /// Every model the editor can call on, which of the three roles each can
@@ -380,6 +395,7 @@ pub fn run() {
         .manage(bar::BarState::default())
         .manage(export::ExportState::default())
         .invoke_handler(tauri::generate_handler![
+            ask_agent,
             ai_models,
             save_ai_key,
             choose_ai_model,

@@ -47,6 +47,9 @@
   /* Blue for sound against the green of picture, so the two are told apart
      at a glance rather than by reading a name. */
   --ed-audio: #2563eb;
+  /* The scrollbar thumb, drawn rather than left to the system. */
+  --ed-scroll: rgba(16, 33, 26, 0.26);
+  --ed-scroll-hover: rgba(16, 33, 26, 0.45);
 
   position: fixed;
   inset: 0;
@@ -95,6 +98,49 @@
   --ed-frame-lift: 0 12px 32px rgba(0, 0, 0, 0.6);
   --ed-playhead: #f87171;
   --ed-audio: #6ea8ff;
+  --ed-scroll: rgba(210, 232, 220, 0.24);
+  --ed-scroll-hover: rgba(210, 232, 220, 0.42);
+}
+
+
+/* ------------------------------------------------------------ scrollbars */
+
+/* The editor's own, in its own palette. Same shape as the ones in
+   App.css; these exist because `.ed-shell *` outranks the bare `*` there
+   and the editor is greener than the rest of the app. */
+.ed-shell *,
+.ed-shell {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ed-scroll) transparent;
+}
+
+.ed-shell *::-webkit-scrollbar,
+.ed-shell::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.ed-shell *::-webkit-scrollbar-track,
+.ed-shell *::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.ed-shell *::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--ed-scroll);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+.ed-shell *::-webkit-scrollbar-thumb:hover {
+  background: var(--ed-scroll-hover);
+  background-clip: content-box;
+}
+
+.ed-shell *::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 /* --------------------------------------------------------- shared atoms */
@@ -2906,6 +2952,16 @@ body.ed-resizing-cols {
   background: var(--ed-surface-3);
 }
 
+/* A hesitation. Underlined rather than coloured in, so it reads as a
+   remark about the word rather than as a selection — the two can be true
+   of the same word at once, and a selection has to stay the louder of
+   them. */
+.ed-shell .ed-word.is-filler {
+  text-decoration: underline wavy var(--ed-note-edge);
+  text-underline-offset: 3px;
+  color: var(--ed-text-dim);
+}
+
 /* The run about to be taken out, marked plainly: this is a destructive
    button's worth of selection and it should not be possible to press
    Remove without knowing exactly what goes. */
@@ -2927,14 +2983,112 @@ body.ed-resizing-cols {
   font-size: 11.5px;
 }
 
+/* ----------------------------------------------------- the agent panel */
+
+/* A column of its own at the far right, beyond the inspector.
+ *
+ * Docked rather than floating: the stage gives up the room, so nothing
+ * the agent says ever covers the frame it is talking about. Shares the
+ * inspector's grip, since it is the same gesture on the same kind of
+ * edge. */
+.ed-shell .ed-agent {
+  flex: none;
+  width: 340px;
+  min-width: 340px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--ed-surface);
+  border-left: 1px solid var(--ed-border);
+  overflow: hidden;
+}
+
+.ed-shell .ed-agent-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 10px 14px;
+  border-bottom: 1px solid var(--ed-border);
+}
+
+.ed-shell .ed-agent-head h2 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Where the conversation will go: the part that grows, so the box to type
+   in stays against the bottom however long the thread gets. */
+.ed-shell .ed-agent-thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px;
+}
+
+.ed-shell .ed-agent-empty p {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+}
+
+.ed-shell .ed-agent-ask {
+  flex: none;
+  padding: 10px 14px 14px;
+  border-top: 1px solid var(--ed-border);
+}
+
+.ed-shell .ed-agent-box {
+  width: 100%;
+  resize: none;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.ed-shell .ed-agent-send {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ed-shell .ed-agent-send .ed-muted {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A toggle that is currently on, so the button says whether the panel is
+   showing without anyone having to look for the panel. */
+.ed-shell .ed-iconbtn.is-on {
+  background: var(--ed-accent-soft);
+  color: var(--ed-accent-hover);
+}
+
 /* ------------------------------------------------------- AI providers */
 
-/* Wider than the ordinary box: three role pickers and a card per
-   provider do not read well in a column the width of a speed dial. */
-.ed-shell .ed-modal.ed-ai {
-  width: min(560px, calc(100vw - 48px));
-  max-height: calc(100vh - 96px);
-  overflow-y: auto;
+/* A page inside the agent's column now, rather than a window over the
+   picture — so it takes the width it is given instead of setting one. */
+.ed-shell .ed-ai {
+  min-width: 0;
+}
+
+/* In a column this narrow the role picker reads better stacked than in a
+   row: a dropdown squeezed beside a label has room for neither. */
+.ed-shell .ed-ai .ed-role-head {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.ed-shell .ed-ai .ed-role-pick {
+  flex: 1 1 100%;
 }
 
 .ed-shell .ed-ai-heading {

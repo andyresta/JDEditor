@@ -34,6 +34,8 @@
   --app-danger-ink: #991b1b;
   --app-window: linear-gradient(180deg, #f6fcf8 0%, #e4f3ea 100%);
   --app-lift: rgba(0, 0, 0, 0.06);
+  --app-scroll: rgba(16, 33, 26, 0.26);
+  --app-scroll-hover: rgba(16, 33, 26, 0.45);
 
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 15px;
@@ -78,10 +80,63 @@
   --app-danger-ink: #fca5a5;
   --app-window: linear-gradient(180deg, #171b19 0%, #10150f 100%);
   --app-lift: rgba(255, 255, 255, 0.08);
+  --app-scroll: rgba(210, 232, 220, 0.24);
+  --app-scroll-hover: rgba(210, 232, 220, 0.42);
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* ------------------------------------------------------------ scrollbars */
+
+/* The window's own scrollbars, which otherwise arrive as the operating
+   system draws them: a grey trough with a stepper arrow at each end, wider
+   than anything else in the app and belonging to no theme at all. One of
+   them sitting down the side of a dark panel is the loudest thing on the
+   screen.
+ *
+ * Drawn here instead: no arrows, no trough, a thumb that only shows
+ * against what it is scrolling. The `scrollbar-*` properties are the
+ * standard ones and the `::-webkit-` rules are what this webview actually
+ * honours; both are set so neither a newer nor an older engine falls back
+ * to the system bar. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-scroll) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--app-scroll);
+  /* Drawn inside a transparent border so the thumb reads as a slim
+     rounded bar with air around it rather than filling the gutter. */
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--app-scroll-hover);
+  background-clip: content-box;
+}
+
+/* The stepper arrows at each end. Nothing in this app is navigated a line
+   at a time by clicking a triangle, and they are half the width the bar
+   needs to be. */
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 body {

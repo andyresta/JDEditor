@@ -24,7 +24,9 @@ import {
 import { drawTextLayer, textBounds } from "../textLayer";
 import { MenuBar, type MenuDef } from "./MenuBar";
 import { AiSettings } from "./AiSettings";
+import { fillerAt } from "../fillers";
 import { useTheme } from "../theme";
+import { api } from "../api";
 import {
   BACKDROP_CATEGORIES,
   BACKDROP_KINDS,
@@ -46,6 +48,7 @@ import {
   type ProjectNote,
   CAPTION_WORD_COUNTS,
   type CaptionProgress,
+  type AiModel,
   type SpeechEngine,
   type TimedWord,
   MAX_SPEED,
@@ -62,6 +65,7 @@ import {
   transitionSeconds as transitionSecondsOf,
   type TransitionKind,
   layerFramingAt,
+  isSoundClip,
   isTextClip,
   layoutAt,
   DEFAULT_CLIP_SECONDS,
@@ -184,6 +188,8 @@ interface EditorShellProps {
   words: TimedWord[];
   /** Takes one stretch out and closes the gap. */
   onRemoveSpan: (fromSeconds: number, toSeconds: number) => boolean;
+  /** Takes every hesitation out at once, answering with how much went. */
+  onRemoveFillers: () => { runs: number; seconds: number };
   /** Re-reads which service is marked, after the AI box has been in.
    * The caption panel shows that choice, and a panel showing a stale
    * answer is worse than one showing none. */
@@ -254,6 +260,10 @@ const WARM_SECONDS = 1.5;
 const INSPECTOR_NARROWEST = 240;
 const INSPECTOR_WIDEST = 620;
 const INSPECTOR_DEFAULT = 300;
+/** The agent's column: what it opens at, and how far it can be dragged. */
+const AGENT_DEFAULT = 340;
+const AGENT_NARROWEST = 260;
+const AGENT_WIDEST = 620;
 
 /** How close a layer's edge has to come to the frame's before it is taken
  * there exactly. In pixels rather than in fractions of the frame, so the
@@ -458,7 +468,9 @@ type IconName =
   | "note"
   | "sun"
   | "moon"
-  | "sparkle";
+  | "sparkle"
+  | "chat"
+  | "settings";
 
 /** Light or dark, by hand.
  *
@@ -666,6 +678,19 @@ function iconPaths(name: IconName) {
     // shape, because the button it sits in is sixteen pixels across and
     // an outline that size reads as a smudge — which is exactly what was
     // wrong with the wand it replaces.
+    // Sliders: which model does what, rather than anything about the film.
+    case "settings":
+      return (
+        <>
+          <path d="M5 7h14M5 12h14M5 17h14" />
+          <circle cx="9" cy="7" r="2" />
+          <circle cx="15" cy="12" r="2" />
+          <circle cx="8" cy="17" r="2" />
+        </>
+      );
+    // A speech bubble: the panel where an edit is asked for in words.
+    case "chat":
+      return <path d="M4 5h16v11H9l-5 4v-4H4z" />;
     case "sparkle":
       return (
         <path
@@ -1003,6 +1028,7 @@ export function EditorShell({
   onRemoveSilences,
   words,
   onRemoveSpan,
+  onRemoveFillers,
   onAutoCaption,
   captionRun,
   captionError,
@@ -1051,6 +1077,11 @@ export function EditorShell({
   const [mediaKind, setMediaKind] = useState<"video" | "image" | "audio" | "clip">(
     "video",
   );
+  /** Where the hesitations are, so they can be shown before they are
+   * removed. Worked out afresh whenever the transcript changes, which is
+   * cheap: it is a lookup per word. */
+  const fillers = useMemo(() => fillerAt(words), [words]);
+
   /** Which words are picked out in the transcript, as the first and
    * last of a run. Held as ids rather than as times so the selection
    * survives an edit that moves the words underneath it. */
@@ -1061,6 +1092,9 @@ export function EditorShell({
   /** The service marked as the ears, which is what Auto Caption uses. */
   const ears = speechEngines.find((engine) => engine.isDefault) ?? null;
 
+  /** What is being typed to the agent. Nothing sends it yet; the box is
+   * here so the shape of the panel is honest about what will be in it. */
+  const [agentTyped, setAgentTyped] = useState("");
   /** Whether the AI provider settings are open. App settings rather
    * than project settings, so they live in a box of their own. */
   const [aiOpen, setAiOpen] = useState(false);
@@ -1143,11 +1177,24 @@ export function EditorShell({
     rounded,
     timelineZoom,
     inspectorWidth = INSPECTOR_DEFAULT,
+    agentWidth = AGENT_DEFAULT,
+    agentOpen = false,
   } =
     settings;
 
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+
+  /** The model marked as the brain, so the panel can say whose answer it
+   * would be before anyone asks for one. */
+  const [brain, setBrain] = useState<AiModel | null>(null);
+  useEffect(() => {
+    if (!agentOpen) return;
+    void api
+      .aiModels()
+      .then((all) => setBrain(all.find((m) => m.chosenFor.includes("brain")) ?? null))
+      .catch(() => setBrain(null));
+  }, [agentOpen, aiOpen]);
 
   // Reads the latest settings out of a ref so the callback identity stays
   // stable — the zoom nudger is referenced from the View menu and from the
@@ -1307,6 +1354,10 @@ export function EditorShell({
     clipId: string;
     x: number;
     y: number;
+    /** How far into the clip the press landed, in the clip's own seconds.
+     * A volume point added from this menu belongs where the pointer was,
+     * not at the start of the clip. */
+    atSeconds: number;
   } | null>(null);
   /** The menu raised by right-clicking a picture in the preview. Kept
    * apart from the timeline's clip menu: what can be done to a layer in
@@ -1607,10 +1658,7 @@ export function EditorShell({
       const item = isTextClip(clip) ? titleStandIn(clip) : mediaByPath.get(clip.mediaPath);
       if (!item) continue;
 
-      // Sound or picture is the clip's own nature, not the lane's: a video
-      // dragged onto an audio track is still a video, while the half that
-      // Split Audio lifted off one stays sound wherever it is put.
-      const audioOnly = Boolean(clip.soundOnly) || item.kind === "audio";
+      const audioOnly = isSoundClip(clip, item.kind);
 
       // Pushed first, so it sits under the clip arriving over it: layers
       // at the same depth are stacked in the order they are drawn.
@@ -1825,7 +1873,32 @@ export function EditorShell({
           const name = error instanceof DOMException ? error.name : "";
           if (name === "AbortError" || !element.isConnected) return;
           setIsPlaying(false);
-          setToast("This clip could not be played.");
+
+          // Say which clip and why.
+          //
+          // "This clip could not be played" named neither, which left the
+          // only way forward being to guess — and the reasons are not
+          // alike: a file that has moved needs finding, a codec the
+          // webview cannot decode needs converting, and a browser
+          // refusing to start needs a press of the button. The error also
+          // goes to the console in full, because a toast is too short for
+          // a stack.
+          console.error("could not play", layer.clip.mediaPath, error);
+          const why =
+            name === "NotSupportedError"
+              ? "nothing here can decode it"
+              : name === "NotAllowedError"
+                ? "the window would not start it"
+                : element.error
+                  ? // 2 is a network error, 3 a decode failure, 4 a source
+                    // that cannot be used at all.
+                    element.error.code === 2
+                      ? "it could not be read"
+                      : element.error.code === 3
+                        ? "it could not be decoded"
+                        : "the file could not be used"
+                  : name || "it would not start";
+          setToast(`${layer.item.name} could not be played — ${why}.`);
         });
       }
     }
@@ -2510,6 +2583,34 @@ export function EditorShell({
     window.addEventListener("pointerup", onUp);
   }
 
+  /** The agent column's edge, dragged the same way the inspector's is. */
+  function startAgentResize(event: ReactPointerEvent<HTMLElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const panel = event.currentTarget.parentElement as HTMLElement | null;
+    if (!panel) return;
+    const from = event.clientX;
+    const was = panel.getBoundingClientRect().width;
+    let latest = was;
+
+    const onMove = (e: PointerEvent) => {
+      // Leftwards is wider: the panel is on the right.
+      const wanted = was + (from - e.clientX);
+      latest = Math.round(Math.min(AGENT_WIDEST, Math.max(AGENT_NARROWEST, wanted)));
+      panel.style.width = `${latest}px`;
+      panel.style.minWidth = `${latest}px`;
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.classList.remove("ed-resizing-cols");
+      if (latest !== was) patchSettings({ agentWidth: latest });
+    };
+    document.body.classList.add("ed-resizing-cols");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
   /** Asks the library. */
   async function runLibrarySearch() {
     if (librarySearch.trim().length === 0) return;
@@ -2757,29 +2858,34 @@ export function EditorShell({
     window.addEventListener("pointerup", onUp);
   }
 
-  /** Double-clicking the line puts a point where it was clicked, at the
-   * level the line already reads there — so adding one never changes the
-   * sound until it is dragged. */
+  /** Puts a point on a clip's volume line at a moment in the clip.
+   *
+   * At the level the line already reads there, so adding one never
+   * changes the sound until it is dragged. */
+  function addVolumePointAt(clip: TimelineClip, at: number) {
+    if (clip.durationSeconds <= 0) return;
+    const points = volumePointsOf(clip);
+    const where = clamp(at, 0, clip.durationSeconds);
+    const before = points.findIndex((point) => point.at > where);
+    const next = [...points];
+    next.splice(before < 0 ? points.length : before, 0, {
+      at: where,
+      gain: gainAt(points, where),
+    });
+    onUpdateClipVolume(clip.id, next);
+  }
+
+  /** Double-clicking the line puts a point where it was clicked. */
   function addVolumePoint(event: ReactMouseEvent<Element>, clip: TimelineClip) {
     const box = event.currentTarget.closest(".ed-clip");
     if (!box || clip.durationSeconds <= 0) return;
     event.preventDefault();
     event.stopPropagation();
-
     const rect = box.getBoundingClientRect();
-    const points = volumePointsOf(clip);
-    const at = clamp(
+    addVolumePointAt(
+      clip,
       ((event.clientX - rect.left) / rect.width) * clip.durationSeconds,
-      0,
-      clip.durationSeconds,
     );
-    const before = points.findIndex((point) => point.at > at);
-    const next = [...points];
-    next.splice(before < 0 ? points.length : before, 0, {
-      at,
-      gain: gainAt(points, at),
-    });
-    onUpdateClipVolume(clip.id, next);
   }
 
   /** Double-clicking a point takes it away again. */
@@ -3114,7 +3220,23 @@ export function EditorShell({
     event.preventDefault();
     event.stopPropagation();
     selectForGesture(clipId, event);
-    setClipMenu({ clipId, x: event.clientX, y: event.clientY });
+
+    // Where along the clip the press landed. Taken from the clip's own
+    // box rather than from the timeline, so a clip scrolled half out of
+    // view still answers correctly.
+    const box = (event.target as Element | null)?.closest?.(".ed-clip");
+    const clip = clipsById.get(clipId)?.clip;
+    let atSeconds = 0;
+    if (box && clip && clip.durationSeconds > 0) {
+      const rect = box.getBoundingClientRect();
+      atSeconds = clamp(
+        ((event.clientX - rect.left) / rect.width) * clip.durationSeconds,
+        0,
+        clip.durationSeconds,
+      );
+    }
+
+    setClipMenu({ clipId, x: event.clientX, y: event.clientY, atSeconds });
   }
 
   /* ------------------------------------------------- layers on the stage */
@@ -3847,12 +3969,13 @@ export function EditorShell({
         </div>
 
         <button
-          className="ed-iconbtn"
-          title="Choose which AI does the seeing, the hearing and the thinking"
-          aria-label="AI providers"
-          onClick={() => setAiOpen(true)}
+          className={`ed-iconbtn ${agentOpen ? "is-on" : ""}`}
+          title={agentOpen ? "Hide the agent panel" : "Show the agent panel"}
+          aria-label={agentOpen ? "Hide the agent panel" : "Show the agent panel"}
+          aria-pressed={agentOpen}
+          onClick={() => patchSettings({ agentOpen: !agentOpen })}
         >
-          <Icon name="sparkle" />
+          <Icon name="chat" />
         </button>
 
         <ThemeToggle />
@@ -4950,7 +5073,15 @@ export function EditorShell({
                     <span className="ed-ears-who">
                       {ears ? `${ears.provider} · ${ears.model}` : "No service chosen yet"}
                     </span>
-                    <button className="ed-pill" onClick={() => setAiOpen(true)}>
+                    <button
+                      className="ed-pill"
+                      onClick={() => {
+                        // The settings live in the agent's column now, so
+                        // asking for them has to open it.
+                        patchSettings({ agentOpen: true });
+                        setAiOpen(true);
+                      }}
+                    >
                       {ears ? "Change" : "Choose"}
                     </button>
                   </div>
@@ -4973,6 +5104,31 @@ export function EditorShell({
                         Click a word, then another, to pick a run. Removing it
                         takes that stretch out of the film and closes the gap.
                       </p>
+                      {fillers.size > 0 && (
+                        <div className="ed-transcript-go">
+                          <span className="ed-muted">
+                            {fillers.size} hesitation
+                            {fillers.size === 1 ? "" : "s"} found
+                          </span>
+                          <button
+                            className="ed-pill"
+                            title="Take every one of them out, in one step"
+                            onClick={() => {
+                              const { runs, seconds } = onRemoveFillers();
+                              setPickedWords(null);
+                              setToast(
+                                runs === 0
+                                  ? "Nothing to take out."
+                                  : `${runs} hesitation${runs === 1 ? "" : "s"} removed — ${seconds.toFixed(1)}s shorter.`,
+                              );
+                            }}
+                          >
+                            <Icon name="wand" />
+                            <span>Remove all</span>
+                          </button>
+                        </div>
+                      )}
+
                       <div className="ed-transcript">
                         {words.map((word, index) => {
                           const inRun =
@@ -4982,7 +5138,9 @@ export function EditorShell({
                           return (
                             <button
                               key={`${word.clipId}-${index}`}
-                              className={`ed-word ${inRun ? "is-picked" : ""}`}
+                              className={`ed-word ${inRun ? "is-picked" : ""} ${
+                                fillers.has(index) ? "is-filler" : ""
+                              }`}
                               title={formatTimecode(word.start)}
                               onClick={() => {
                                 setPickedWords((current) => {
@@ -5320,6 +5478,108 @@ export function EditorShell({
                 </>
               )}
             </div>
+          </aside>
+        )}
+        {agentOpen && (
+          <aside className="ed-agent" style={{ width: agentWidth, minWidth: agentWidth }}>
+            {/* Its own column at the far right, not a window floating over
+                the picture: the stage gives up the room, so nothing the
+                agent says ever covers the frame being talked about. */}
+            <div
+              className="ed-inspector-grip"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Drag to resize the agent panel"
+              title="Drag to resize"
+              onPointerDown={startAgentResize}
+              onDoubleClick={() => patchSettings({ agentWidth: AGENT_DEFAULT })}
+            />
+
+            <header className="ed-agent-head">
+              <Icon name="sparkle" />
+              <h2>{aiOpen ? "AI providers" : "Agent"}</h2>
+              {aiOpen ? (
+                <button
+                  className="ed-iconbtn"
+                  title="Back to the conversation"
+                  aria-label="Back to the conversation"
+                  onClick={() => setAiOpen(false)}
+                >
+                  <Icon name="close" />
+                </button>
+              ) : (
+                <>
+                  <button
+                    className="ed-iconbtn"
+                    title="Choose which AI does the seeing, the hearing and the thinking"
+                    aria-label="AI providers"
+                    onClick={() => setAiOpen(true)}
+                  >
+                    <Icon name="settings" />
+                  </button>
+                  <button
+                    className="ed-iconbtn"
+                    title="Hide the agent panel"
+                    aria-label="Hide the agent panel"
+                    onClick={() => patchSettings({ agentOpen: false })}
+                  >
+                    <Icon name="close" />
+                  </button>
+                </>
+              )}
+            </header>
+
+            {aiOpen ? (
+              <div className="ed-agent-thread">
+                <AiSettings
+                  onClose={() => {
+                    setAiOpen(false);
+                    onRefreshSpeechEngines();
+                  }}
+                />
+              </div>
+            ) : (
+              <>
+            <div className="ed-agent-thread">
+              <div className="ed-agent-empty">
+                <p>Nothing has been asked yet.</p>
+                <p className="ed-note">
+                  This is where an edit will be asked for in words — "take out
+                  the long pause near the start", "cut the bit where I lost my
+                  thread" — and where what it proposes will be shown before
+                  anything happens to the film.
+                </p>
+                <p className="ed-note">
+                  It is not wired to a model yet. What it already knows how to
+                  do without one is under Edit: Remove Silences, and the
+                  transcript below Auto Caption.
+                </p>
+              </div>
+            </div>
+
+            <div className="ed-agent-ask">
+              <textarea
+                className="ed-input ed-agent-box"
+                rows={3}
+                placeholder="Ask for an edit…"
+                value={agentTyped}
+                disabled
+                onChange={(e) => {
+                  const typing = e.currentTarget.value;
+                  setAgentTyped(typing);
+                }}
+              />
+              <div className="ed-agent-send">
+                <span className="ed-muted">
+                  {brain ? `${brain.providerName} · ${brain.model}` : "No brain chosen"}
+                </span>
+                <button className="ed-pill ed-pill-primary" disabled>
+                  <span>Send</span>
+                </button>
+              </div>
+            </div>
+              </>
+            )}
           </aside>
         )}
       </div>
@@ -6177,6 +6437,29 @@ Right-click for audio options`}
             <Icon name="crop" />
             <span>Auto Zoom to Clicks</span>
           </button>
+          {/* The volume line takes a point on a double-click, which is
+              quick once you know and invisible until you do — and this
+              menu is where people look for it. */}
+          <button
+            className="ed-clipmenu-item"
+            role="menuitem"
+            disabled={isTextClip(menuTarget.clip) || menuTarget.clip.muted === true}
+            title={
+              isTextClip(menuTarget.clip)
+                ? "A title has no sound to shape"
+                : menuTarget.clip.muted
+                  ? "This clip is muted"
+                  : "Add a point to this clip's volume line here, then drag it up or down"
+            }
+            onClick={() => {
+              addVolumePointAt(menuTarget.clip, clipMenu.atSeconds);
+              setClipMenu(null);
+              setToast("Volume point added — drag it up or down.");
+            }}
+          >
+            <Icon name="speaker" />
+            <span>Add Volume Point</span>
+          </button>
           <button
             className="ed-clipmenu-item"
             role="menuitem"
@@ -6278,15 +6561,6 @@ Right-click for audio options`}
             </button>
           </div>
         </div>
-      )}
-
-      {aiOpen && (
-        <AiSettings
-          onClose={() => {
-            setAiOpen(false);
-            onRefreshSpeechEngines();
-          }}
-        />
       )}
 
       {/* A file, played where it cannot be mistaken for the edit.

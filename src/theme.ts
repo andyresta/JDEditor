@@ -46,12 +46,31 @@ export function resolve(choice: ThemeChoice): Theme {
   return query()?.matches ? "dark" : "light";
 }
 
+/** Tells the window frame which theme it is in.
+ *
+ * The bar across the top with the title and the close button is drawn by
+ * Windows, not by this app, so no stylesheet can reach it — a dark editor
+ * under a white title bar is the one part that would never follow. Tauri
+ * can pass the preference down to the system, which is what this does.
+ *
+ * Deliberately not awaited and deliberately not silent: it is a nicety
+ * rather than a requirement, and a window that refuses should say so in
+ * the console rather than leave someone wondering why one strip stayed
+ * pale. Imported when needed so that anything running this module outside
+ * Tauri — a test page, for instance — simply never asks. */
+function tellTheWindow(theme: Theme): void {
+  void import("@tauri-apps/api/window")
+    .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(theme))
+    .catch((err) => console.error("could not set the window theme", err));
+}
+
 /** Paints it. The attribute is always one of the two real themes, never
  * "system": the stylesheets should not have to know that following the
  * system is even a possibility. */
 export function apply(choice: ThemeChoice): Theme {
   const theme = resolve(choice);
   document.documentElement.dataset.theme = theme;
+  tellTheWindow(theme);
   return theme;
 }
 
@@ -83,6 +102,16 @@ export function watchSystem(onChange: () => void): () => void {
  */
 export function useTheme(): { theme: Theme; toggle: () => void } {
   const [theme, setTheme] = useState<Theme>(() => resolve(readChoice()));
+
+  // The inline script in index.html sets the attribute before the first
+  // paint, but it cannot reach the window frame — Tauri's API is not
+  // loaded that early. So the frame is told once, here, as soon as
+  // anything is on screen.
+  useEffect(() => {
+    tellTheWindow(theme);
+    // Once on mount: every later change goes through `apply`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // While nothing has been chosen, "follow the system" has to go on
   // meaning that — not only at startup.
