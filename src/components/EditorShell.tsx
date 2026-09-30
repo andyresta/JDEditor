@@ -24,7 +24,16 @@ import {
 import { drawTextLayer, textBounds } from "../textLayer";
 import { MenuBar, type MenuDef } from "./MenuBar";
 import { AiSettings } from "./AiSettings";
-import { fillerAt } from "../fillers";
+import { describe } from "../describe";
+import {
+  apply as applyOps,
+  asOperation,
+  explain,
+  problemWith,
+  type EditDoc,
+  type Operation,
+} from "../ops";
+import { quietRanges } from "../silence";
 import { useTheme } from "../theme";
 import { api } from "../api";
 import {
@@ -39,7 +48,7 @@ import {
   FRAME_SHAPES,
   FRAME_SHAPE_LABELS,
   shapeRatio,
-  CAPTION_LANGUAGES,
+  languageName,
   type SavedClip,
   LICENCE_LABELS,
   type LibraryItem,
@@ -48,6 +57,7 @@ import {
   type ProjectNote,
   CAPTION_WORD_COUNTS,
   type CaptionProgress,
+  type AgentTurn,
   type AiModel,
   type SpeechEngine,
   type TimedWord,
@@ -188,8 +198,9 @@ interface EditorShellProps {
   words: TimedWord[];
   /** Takes one stretch out and closes the gap. */
   onRemoveSpan: (fromSeconds: number, toSeconds: number) => boolean;
-  /** Takes every hesitation out at once, answering with how much went. */
-  onRemoveFillers: () => { runs: number; seconds: number };
+  /** Applies a batch of edits as one step. Answers with what went wrong,
+   * or null when it all went through. */
+  onApplyOperations: (ops: Operation[]) => string | null;
   /** Re-reads which service is marked, after the AI box has been in.
    * The caption panel shows that choice, and a panel showing a stale
    * answer is worse than one showing none. */
@@ -1028,7 +1039,7 @@ export function EditorShell({
   onRemoveSilences,
   words,
   onRemoveSpan,
-  onRemoveFillers,
+  onApplyOperations,
   onAutoCaption,
   captionRun,
   captionError,
@@ -1077,11 +1088,6 @@ export function EditorShell({
   const [mediaKind, setMediaKind] = useState<"video" | "image" | "audio" | "clip">(
     "video",
   );
-  /** Where the hesitations are, so they can be shown before they are
-   * removed. Worked out afresh whenever the transcript changes, which is
-   * cheap: it is a lookup per word. */
-  const fillers = useMemo(() => fillerAt(words), [words]);
-
   /** Which words are picked out in the transcript, as the first and
    * last of a run. Held as ids rather than as times so the selection
    * survives an edit that moves the words underneath it. */
@@ -1092,9 +1098,19 @@ export function EditorShell({
   /** The service marked as the ears, which is what Auto Caption uses. */
   const ears = speechEngines.find((engine) => engine.isDefault) ?? null;
 
-  /** What is being typed to the agent. Nothing sends it yet; the box is
-   * here so the shape of the panel is honest about what will be in it. */
+  /** What is being typed to the agent. */
   const [agentTyped, setAgentTyped] = useState("");
+  /** What has been said, oldest first. */
+  const [agentThread, setAgentThread] = useState<AgentTurn[]>([]);
+  /** Whether a question is out with the model. The call takes as long as
+   * it takes — a thinking model reading a long transcript is not quick —
+   * so the panel says so rather than sitting still. */
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentError, setAgentError] = useState<string | null>(null);
+  /** Turns whose proposal has been applied or thrown away, by their place
+   * in the thread. A proposal is only ever offered once: the film it was
+   * written against has moved on by the time it has been used. */
+  const [agentSettled, setAgentSettled] = useState<Map<number, string>>(new Map());
   /** Whether the AI provider settings are open. App settings rather
    * than project settings, so they live in a box of their own. */
   const [aiOpen, setAiOpen] = useState(false);
@@ -1185,16 +1201,32 @@ export function EditorShell({
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
 
-  /** The model marked as the brain, so the panel can say whose answer it
-   * would be before anyone asks for one. */
-  const [brain, setBrain] = useState<AiModel | null>(null);
+  /** Every model and what it has been marked for, so the panel can say
+   * what the agent is able to do before anyone asks it to do anything.
+   *
+   * Re-read whenever the settings page has been in, since that is the
+   * only thing that changes it. */
+  const [aiModels, setAiModels] = useState<AiModel[]>([]);
   useEffect(() => {
     if (!agentOpen) return;
     void api
       .aiModels()
-      .then((all) => setBrain(all.find((m) => m.chosenFor.includes("brain")) ?? null))
-      .catch(() => setBrain(null));
+      .then(setAiModels)
+      .catch(() => setAiModels([]));
   }, [agentOpen, aiOpen]);
+  const brain = aiModels.find((m) => m.chosenFor.includes("brain")) ?? null;
+
+  /** The conversation, so a new answer can be scrolled to rather than
+   * appearing below the fold. */
+  const agentThreadRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const thread = agentThreadRef.current;
+    if (!thread) return;
+    // The newest turn, not the oldest: a conversation is read from the
+    // bottom, and an answer that arrives below the fold reads as nothing
+    // having happened.
+    thread.scrollTop = thread.scrollHeight;
+  }, [agentThread, agentBusy]);
 
   // Reads the latest settings out of a ref so the callback identity stays
   // stable — the zoom nudger is referenced from the View menu and from the
@@ -2581,6 +2613,108 @@ export function EditorShell({
     document.body.classList.add("ed-resizing-cols");
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+  }
+
+  /** What the agent is able to do as things stand.
+   *
+   * Three of these are settings and one is not: the hands are `ops.ts`,
+   * which is built into the editor and always there. Saying so plainly
+   * is better than leaving a gap where someone would go looking for a
+   * setting that does not exist. */
+  const agentCan = useMemo(() => {
+    const eyes = aiModels.find((m) => m.chosenFor.includes("eyes")) ?? null;
+    const ears = aiModels.find((m) => m.chosenFor.includes("ears")) ?? null;
+    return {
+      brain,
+      eyes,
+      ears,
+      /** A transcript is what the ears actually produced. Having chosen a
+       * service is not the same as having listened. */
+      heard: words.length,
+    };
+  }, [aiModels, brain, words.length]);
+
+  /** A proposal, read and checked, ready to be shown or refused.
+   *
+   * Checked before it is offered rather than when Apply is pressed. A
+   * button that looks ready and then fails is worse than one that was
+   * never there, and the reason can be shown instead. */
+  function readProposal(raw: unknown[] | undefined) {
+    const doc: EditDoc = { tracks, media, notes, words };
+    const ops: Operation[] = [];
+    for (const one of raw ?? []) {
+      const op = asOperation(one);
+      if (!op) {
+        return { ops: [], lines: [], problem: "The model sent something that is not an edit." };
+      }
+      ops.push(op);
+    }
+    if (ops.length === 0) return { ops, lines: [], problem: null };
+
+    // Walked the way applying walks it, so an edit that only makes sense
+    // after the one before it is judged in that light.
+    let walking: EditDoc = doc;
+    for (let i = 0; i < ops.length; i += 1) {
+      const wrong = problemWith(walking, ops[i]);
+      if (wrong) return { ops, lines: [], problem: wrong };
+      walking = applyOps(walking, [ops[i]]).doc;
+    }
+
+    let reading: EditDoc = doc;
+    const lines = ops.map((op) => {
+      const said = explain(op, reading);
+      reading = applyOps(reading, [op]).doc;
+      return said;
+    });
+    return { ops, lines, problem: null };
+  }
+
+  /** Asks the brain about the project.
+   *
+   * The briefing is written fresh every time: the film moves under the
+   * conversation, and an answer built from how it looked three edits ago
+   * would name clips that have since been cut in two. */
+  async function askAgent(asking?: string) {
+    const question = (asking ?? agentTyped).trim();
+    if (question.length === 0 || agentBusy || !brain) return;
+
+    setAgentError(null);
+    setAgentBusy(true);
+    // Only what was typed is cleared; a question asked by a button was
+    // never in the box.
+    if (asking == null) setAgentTyped("");
+    const asked: AgentTurn = { role: "user", content: question };
+    setAgentThread((thread) => [...thread, asked]);
+
+    try {
+      const doc = { tracks, media, notes, words };
+      const reply = await api.askAgent({
+        briefing: describe(doc, { silences: quietRanges(tracks, audioPeaks) }),
+        question,
+        // What was said before, without the proposals: the model wrote
+        // those itself and repeating them back costs tokens to tell it
+        // what it already knows.
+        history: agentThread.map((turn) => ({
+          role: turn.role,
+          content: turn.content,
+        })),
+      });
+      setAgentThread((thread) => [
+        ...thread,
+        {
+          role: "assistant",
+          content: reply.text,
+          operations: reply.operations,
+          model: reply.model,
+        },
+      ]);
+    } catch (error) {
+      // The question stays in the thread: it is what was asked, and
+      // taking it back out would leave the failure unexplained.
+      setAgentError(String(error));
+    } finally {
+      setAgentBusy(false);
+    }
   }
 
   /** The agent column's edge, dragged the same way the inspector's is. */
@@ -5028,19 +5162,27 @@ export function EditorShell({
                   <div className="ed-field">
                     <label className="ed-field-label" htmlFor="ed-caption-language">
                       Language
+                      <span className="ed-field-said">
+                        {captionLanguage.trim().length === 0
+                          ? "left to the service"
+                          : (languageName(captionLanguage) ?? "not a code this window knows")}
+                      </span>
                     </label>
-                    <select
+                    {/* Typed rather than picked from a list: the
+                        services take any ISO code, and a list would only
+                        ever hold the languages somebody thought to add. */}
+                    <input
                       id="ed-caption-language"
-                      className="ed-select"
+                      className="ed-input"
                       value={captionLanguage}
-                      onChange={(e) => setCaptionLanguage(e.currentTarget.value)}
-                    >
-                      {CAPTION_LANGUAGES.map((language) => (
-                        <option key={language.code} value={language.code}>
-                          {language.label}
-                        </option>
-                      ))}
-                    </select>
+                      placeholder="Detect automatically"
+                      autoComplete="off"
+                      spellCheck={false}
+                      onChange={(e) => {
+                        const typed = e.currentTarget.value;
+                        setCaptionLanguage(typed);
+                      }}
+                    />
                   </div>
 
                   <div className="ed-field">
@@ -5104,30 +5246,35 @@ export function EditorShell({
                         Click a word, then another, to pick a run. Removing it
                         takes that stretch out of the film and closes the gap.
                       </p>
-                      {fillers.size > 0 && (
-                        <div className="ed-transcript-go">
-                          <span className="ed-muted">
-                            {fillers.size} hesitation
-                            {fillers.size === 1 ? "" : "s"} found
-                          </span>
-                          <button
-                            className="ed-pill"
-                            title="Take every one of them out, in one step"
-                            onClick={() => {
-                              const { runs, seconds } = onRemoveFillers();
-                              setPickedWords(null);
-                              setToast(
-                                runs === 0
-                                  ? "Nothing to take out."
-                                  : `${runs} hesitation${runs === 1 ? "" : "s"} removed — ${seconds.toFixed(1)}s shorter.`,
-                              );
-                            }}
-                          >
-                            <Icon name="wand" />
-                            <span>Remove all</span>
-                          </button>
-                        </div>
-                      )}
+                      {/* Hesitations are found by the model, not by a list
+                          of words kept here. "um", "eh", "ano", "este" —
+                          every language has its own, and a list written by
+                          hand only ever serves the few its author happened
+                          to know. The agent reads the transcript and
+                          proposes what to cut, and the proposal is
+                          approved like any other. */}
+                      <div className="ed-transcript-go">
+                        <span className="ed-muted">{words.length} words</span>
+                        <button
+                          className="ed-pill"
+                          title="Ask the agent to find the hesitations and propose removing them"
+                          onClick={() => {
+                            patchSettings({ agentOpen: true });
+                            setPickedWords(null);
+                            void askAgent(
+                              "Find every hesitation and filler in the transcript — " +
+                                "the sounds someone makes while deciding what to say " +
+                                "next, in whatever language this was spoken. Propose " +
+                                "removing each one with removeRange. Leave real words " +
+                                "alone, including ones that are only sometimes " +
+                                "hesitations.",
+                            );
+                          }}
+                        >
+                          <Icon name="sparkle" />
+                          <span>Find hesitations</span>
+                        </button>
+                      </div>
 
                       <div className="ed-transcript">
                         {words.map((word, index) => {
@@ -5138,9 +5285,7 @@ export function EditorShell({
                           return (
                             <button
                               key={`${word.clipId}-${index}`}
-                              className={`ed-word ${inRun ? "is-picked" : ""} ${
-                                fillers.has(index) ? "is-filler" : ""
-                              }`}
+                              className={`ed-word ${inRun ? "is-picked" : ""}`}
                               title={formatTimecode(word.start)}
                               onClick={() => {
                                 setPickedWords((current) => {
@@ -5540,42 +5685,189 @@ export function EditorShell({
               </div>
             ) : (
               <>
-            <div className="ed-agent-thread">
-              <div className="ed-agent-empty">
-                <p>Nothing has been asked yet.</p>
-                <p className="ed-note">
-                  This is where an edit will be asked for in words — "take out
-                  the long pause near the start", "cut the bit where I lost my
-                  thread" — and where what it proposes will be shown before
-                  anything happens to the film.
-                </p>
-                <p className="ed-note">
-                  It is not wired to a model yet. What it already knows how to
-                  do without one is under Edit: Remove Silences, and the
-                  transcript below Auto Caption.
-                </p>
-              </div>
+            <div className="ed-agent-thread" ref={agentThreadRef}>
+              {agentThread.length === 0 && (
+                <div className="ed-agent-empty">
+                  <p>Nothing has been asked yet.</p>
+                  <p className="ed-note">
+                    Ask about the film in words — "what did I say near the
+                    start?", "where are the long pauses?" — or ask for an edit.
+                  </p>
+
+                  {/* What it can and cannot do, said plainly. Three of
+                      these are chosen under the settings; the hands are
+                      part of the editor and need nothing. */}
+                  <h3 className="ed-agent-can-head">What it can do right now</h3>
+                  <ul className="ed-agent-can">
+                    <li className={agentCan.brain ? "is-on" : ""}>
+                      <strong>Brain</strong>
+                      <span>
+                        {agentCan.brain
+                          ? `${agentCan.brain.providerName} · ${agentCan.brain.model}`
+                          : "not chosen — nothing can be asked without one"}
+                      </span>
+                    </li>
+                    <li className="is-on">
+                      <strong>Hands</strong>
+                      <span>
+                        built in — cutting, moving, retiming, titles and notes
+                      </span>
+                    </li>
+                    <li className={agentCan.heard > 0 ? "is-on" : ""}>
+                      <strong>Ears</strong>
+                      <span>
+                        {agentCan.heard > 0
+                          ? `${agentCan.heard} words heard`
+                          : agentCan.ears
+                            ? "nothing transcribed yet — run Auto Caption first"
+                            : "not chosen — it cannot know what was said"}
+                      </span>
+                    </li>
+                    <li className={agentCan.eyes ? "is-on" : ""}>
+                      <strong>Eyes</strong>
+                      <span>
+                        {agentCan.eyes
+                          ? `${agentCan.eyes.providerName} · ${agentCan.eyes.model}`
+                          : "not chosen — it cannot look at the picture"}
+                      </span>
+                    </li>
+                  </ul>
+                  <p className="ed-note">
+                    A brain on its own can read the timeline and the transcript
+                    and propose edits from them. Eyes are only needed for
+                    questions about what is on screen.
+                  </p>
+                </div>
+              )}
+
+              {agentThread.map((turn, index) => (
+                <div
+                  key={index}
+                  className={`ed-turn ${turn.role === "user" ? "is-mine" : ""}`}
+                >
+                  {turn.content && <p className="ed-turn-said">{turn.content}</p>}
+                  {turn.role === "assistant" &&
+                    (turn.operations?.length ?? 0) > 0 &&
+                    (() => {
+                      const settled = agentSettled.get(index);
+                      if (settled) {
+                        return <p className="ed-note ed-turn-proposed">{settled}</p>;
+                      }
+                      const { ops, lines, problem } = readProposal(turn.operations);
+                      return (
+                        <div className="ed-proposal">
+                          <h4>
+                            {ops.length} edit{ops.length === 1 ? "" : "s"} proposed
+                          </h4>
+                          <ol className="ed-proposal-list">
+                            {(problem ? ops.map(() => "") : lines).map((said, i) => (
+                              <li key={i}>{said || "(could not be read)"}</li>
+                            ))}
+                          </ol>
+                          {problem ? (
+                            <p className="ed-proposal-no">
+                              This cannot be applied: {problem}
+                            </p>
+                          ) : (
+                            <div className="ed-proposal-go">
+                              <button
+                                className="ed-pill"
+                                onClick={() =>
+                                  setAgentSettled((all) =>
+                                    new Map(all).set(index, "Discarded."),
+                                  )
+                                }
+                              >
+                                Discard
+                              </button>
+                              <button
+                                className="ed-pill ed-pill-primary"
+                                onClick={() => {
+                                  const wrong = onApplyOperations(ops);
+                                  setAgentSettled((all) =>
+                                    new Map(all).set(
+                                      index,
+                                      wrong
+                                        ? `Not applied: ${wrong}`
+                                        : `Applied — ${ops.length} edit${
+                                            ops.length === 1 ? "" : "s"
+                                          }. Undo puts it all back.`,
+                                    ),
+                                  );
+                                  if (!wrong) {
+                                    setToast("The agent's edits were applied.");
+                                  }
+                                }}
+                              >
+                                <span>Apply</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  {turn.model && <span className="ed-turn-who">{turn.model}</span>}
+                </div>
+              ))}
+
+              {agentBusy && (
+                <div className="ed-turn">
+                  <p className="ed-turn-said ed-turn-thinking">
+                    <span className="spinner" />
+                    <span>Reading the project…</span>
+                  </p>
+                </div>
+              )}
+
+              {agentError && (
+                <div className="ed-ai-error" role="alert">
+                  {agentError}
+                </div>
+              )}
             </div>
 
             <div className="ed-agent-ask">
               <textarea
                 className="ed-input ed-agent-box"
                 rows={3}
-                placeholder="Ask for an edit…"
+                placeholder={
+                  brain ? "Ask about the film, or for an edit…" : "Choose a brain first"
+                }
                 value={agentTyped}
-                disabled
+                disabled={!brain || agentBusy}
                 onChange={(e) => {
                   const typing = e.currentTarget.value;
                   setAgentTyped(typing);
+                }}
+                onKeyDown={(e) => {
+                  // Enter sends, shift-enter makes a new line: what every
+                  // box like this does.
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void askAgent();
+                  }
                 }}
               />
               <div className="ed-agent-send">
                 <span className="ed-muted">
                   {brain ? `${brain.providerName} · ${brain.model}` : "No brain chosen"}
                 </span>
-                <button className="ed-pill ed-pill-primary" disabled>
-                  <span>Send</span>
-                </button>
+                {brain ? (
+                  <button
+                    className="ed-pill ed-pill-primary"
+                    disabled={agentBusy || agentTyped.trim().length === 0}
+                    onClick={() => void askAgent()}
+                  >
+                    <span>{agentBusy ? "Thinking…" : "Send"}</span>
+                  </button>
+                ) : (
+                  <button
+                    className="ed-pill ed-pill-primary"
+                    onClick={() => setAiOpen(true)}
+                  >
+                    <span>Choose a brain</span>
+                  </button>
+                )}
               </div>
             </div>
               </>

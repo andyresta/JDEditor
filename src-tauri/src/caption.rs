@@ -220,9 +220,54 @@ pub struct Word {
 const PAUSE: f64 = 0.55;
 /// No caption stays up longer than this, however few words it holds.
 const LONGEST: f64 = 2.8;
-/// Nor holds more letters than this, however few words that is — three
-/// long words fill a portrait frame as thoroughly as six short ones.
+/// Nor grows wider than this, however few words that is — three long
+/// words fill a portrait frame as thoroughly as six short ones.
+///
+/// Measured in the half-widths below rather than in characters. Counting
+/// characters treats every writing system as though it were Latin: 32
+/// Chinese characters is a wall of text where 32 Latin ones is five short
+/// words, so a caption in Chinese used to be allowed to grow twice as
+/// wide as the frame it had to fit in.
 const WIDEST: usize = 32;
+
+/// How much room a character takes, in half-widths — 1 for an ordinary
+/// letter, 2 for one of the square ones.
+///
+/// This is a fact about how a glyph is drawn, not a guess about what a
+/// word means: the ranges below are the ones Unicode calls Wide or
+/// Fullwidth, and every font draws them in a square cell twice the width
+/// of a Latin letter. There is no list of words here and nothing to keep
+/// up to date as languages are added.
+fn half_widths(c: char) -> usize {
+    match c as u32 {
+        // Hangul Jamo
+        0x1100..=0x115F
+        // CJK radicals, Kangxi, ideographic punctuation, Kana, Bopomofo,
+        // Hangul compatibility, CJK strokes, enclosed letters
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        // CJK unified ideographs and the blocks around them
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        // Hangul syllables
+        | 0xAC00..=0xD7A3
+        // CJK compatibility ideographs
+        | 0xF900..=0xFAFF
+        // Fullwidth forms
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        // Supplementary ideographic planes
+        | 0x20000..=0x3FFFD => 2,
+        _ => 1,
+    }
+}
+
+/// How wide a piece of text is, in half-widths.
+fn width_of(text: &str) -> usize {
+    text.chars().map(half_widths).sum()
+}
 /// A caption of one word flashing past is unreadable; this is the least
 /// time one is left up, where the next caption is not already due.
 const SHORTEST: f64 = 0.4;
@@ -313,9 +358,9 @@ pub fn into_captions(words: &[Word], job: &CaptionJob, per: usize) -> Vec<Captio
             let long = word.end - held[0].start > LONGEST;
             let wide = held
                 .iter()
-                .map(|w| w.word.trim().chars().count() + 1)
+                .map(|w| width_of(w.word.trim()) + 1)
                 .sum::<usize>()
-                + word.word.trim().chars().count()
+                + width_of(word.word.trim())
                 > WIDEST;
             // A full stop is a place the speaker meant to break.
             let stopped = last
@@ -894,6 +939,50 @@ mod tests {
         let timed = timed_words(&heard, &j);
         assert_eq!(timed.len(), 1);
         assert_eq!(timed[0].word, "kept");
+    }
+
+    /// A square character takes the room of two Latin ones, because that
+    /// is how it is drawn. Counting characters let a caption in Chinese
+    /// grow to twice the width of the frame it had to fit in.
+    #[test]
+    fn a_wide_script_is_measured_by_the_room_it_takes() {
+        assert_eq!(width_of("abcd"), 4);
+        assert_eq!(width_of("汉字"), 4);
+        assert_eq!(width_of("こんにちは"), 10);
+        assert_eq!(width_of("한국어"), 6);
+        // Latin, Cyrillic, Greek, Arabic and Devanagari are all drawn in
+        // ordinary cells and are counted as one apiece.
+        assert_eq!(width_of("привет"), 6);
+        assert_eq!(width_of("مرحبا"), 5);
+        assert_eq!(width_of("नमस्ते"), 6);
+        assert_eq!(width_of("hola"), 4);
+    }
+
+    /// The point of it: a line of square characters breaks where a line
+    /// of Latin ones of the same count would not.
+    #[test]
+    fn a_chinese_caption_breaks_sooner_than_its_character_count_suggests() {
+        // Twenty characters: twenty half-widths in Latin, forty in
+        // Chinese. The limit is thirty-two.
+        let latin = words(&[
+            ("aaaa", 0.0, 0.2),
+            ("bbbb", 0.2, 0.4),
+            ("cccc", 0.4, 0.6),
+            ("dddd", 0.6, 0.8),
+        ]);
+        let chinese = words(&[
+            ("汉字汉字", 0.0, 0.2),
+            ("汉字汉字", 0.2, 0.4),
+            ("汉字汉字", 0.4, 0.6),
+            ("汉字汉字", 0.6, 0.8),
+        ]);
+        let latin_out = into_captions(&latin, &job(), 99);
+        let chinese_out = into_captions(&chinese, &job(), 99);
+        assert_eq!(latin_out.len(), 1, "{latin_out:?}");
+        assert!(
+            chinese_out.len() > 1,
+            "the same number of characters should not fit: {chinese_out:?}"
+        );
     }
 
     fn job() -> CaptionJob {

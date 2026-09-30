@@ -32,6 +32,7 @@
  */
 
 import {
+  isTextClip,
   MAX_SPEED,
   MIN_SPEED,
   DEFAULT_TEXT_SECONDS,
@@ -506,6 +507,133 @@ export function apply(doc: EditDoc, ops: Operation[]): Applied {
     current = run(current, ops[i]);
   }
   return { doc: current, problems: [], failedAt: null };
+}
+
+/* -------------------------------------------------------- in plain words */
+
+/** What a clip is called, for saying something about it.
+ *
+ * The file's name, or a title's own words. Not the id: an id is for the
+ * program, and a list of edits that reads "clip-mf8x2k-3" is a list
+ * nobody can approve.
+ */
+function nameOf(doc: EditDoc, id: string): string {
+  const clip = findClip(doc, id);
+  if (!clip) return id;
+  if (isTextClip(clip)) {
+    const words = clip.text?.content?.split("\n")[0]?.trim();
+    return words ? `"${words}"` : "a title";
+  }
+  const parts = clip.mediaPath.split(/[\\/]/);
+  return parts[parts.length - 1] || id;
+}
+
+const secs = (n: number) => `${n.toFixed(2)}s`;
+
+/** One operation, in a sentence a person can agree or disagree with.
+ *
+ * This is what stands between a model's proposal and somebody pressing
+ * Apply. A panel showing `{"kind":"removeRange","fromSeconds":2.15}` is
+ * asking for approval of something nobody has read; the whole point of
+ * showing a proposal is that it can be understood before it happens.
+ */
+export function explain(op: Operation, doc: EditDoc): string {
+  switch (op.kind) {
+    case "cut":
+      return op.clipId
+        ? `Cut ${nameOf(doc, op.clipId)} at ${secs(op.atSeconds)}`
+        : `Cut every clip at ${secs(op.atSeconds)}`;
+
+    case "removeClips":
+      return op.clipIds.length === 1
+        ? `Remove ${nameOf(doc, op.clipIds[0])}`
+        : `Remove ${op.clipIds.length} clips: ${op.clipIds
+            .map((id) => nameOf(doc, id))
+            .join(", ")}`;
+
+    case "moveClip": {
+      const track = doc.tracks.find((t) => t.id === op.trackId);
+      return `Move ${nameOf(doc, op.clipId)} to ${
+        track ? `"${track.name}"` : op.trackId
+      } at ${secs(op.startSeconds)}`;
+    }
+
+    case "trim":
+      return `Drag the ${op.edge} of ${nameOf(doc, op.clipId)} to ${secs(op.seconds)}`;
+
+    case "setSpeed":
+      return `Play ${
+        op.clipIds.length === 1
+          ? nameOf(doc, op.clipIds[0])
+          : `${op.clipIds.length} clips`
+      } at ${op.speed}x`;
+
+    case "setVolume":
+      return op.points.length === 0
+        ? `Put the volume of ${nameOf(doc, op.clipId)} back to normal`
+        : `Reshape the volume of ${nameOf(doc, op.clipId)} (${op.points.length} point${
+            op.points.length === 1 ? "" : "s"
+          })`;
+
+    case "addTitle": {
+      const words = op.text?.content?.split("\n")[0]?.trim();
+      const where =
+        op.trackId === null
+          ? "on a new track"
+          : `on "${doc.tracks.find((t) => t.id === op.trackId)?.name ?? op.trackId}"`;
+      return `Add the title ${words ? `"${words}"` : "(no words)"} at ${secs(
+        op.atSeconds,
+      )} ${where}`;
+    }
+
+    case "setTransition": {
+      const what =
+        op.clipIds.length === 1 ? nameOf(doc, op.clipIds[0]) : `${op.clipIds.length} clips`;
+      const edge = op.edge === "in" ? "arrives" : "leaves";
+      return op.transition
+        ? `Make ${what} ${edge} with ${op.transition.kind} over ${secs(
+            op.transition.seconds,
+          )}`
+        : `Take the transition off the way ${what} ${edge}`;
+    }
+
+    case "removeRange":
+      return `Remove ${secs(op.fromSeconds)}\u2013${secs(op.toSeconds)} (${secs(
+        op.toSeconds - op.fromSeconds,
+      )}) and close the gap`;
+
+    case "addNote":
+      return `Leave a note at ${secs(op.atSeconds)}: "${op.text}"`;
+
+    case "editNote":
+      return `Rewrite the note at ${secs(
+        doc.notes.find((n) => n.id === op.noteId)?.atSeconds ?? 0,
+      )}: "${op.text}"`;
+
+    case "moveNote":
+      return `Move a note to ${secs(op.atSeconds)}`;
+
+    case "removeNotes":
+      return op.noteIds.length === 1
+        ? "Remove a note"
+        : `Remove ${op.noteIds.length} notes`;
+
+    default:
+      return "An edit this version does not know about";
+  }
+}
+
+/** Whether something that arrived from outside is shaped like an
+ * operation at all.
+ *
+ * What a model sends is JSON, not a value of this type. Everything past
+ * the `kind` is left to `problemWith`, which can say what is wrong in
+ * words; this only rules out what is not an operation in the first place.
+ */
+export function asOperation(value: unknown): Operation | null {
+  if (typeof value !== "object" || value === null) return null;
+  const kind = (value as { kind?: unknown }).kind;
+  return typeof kind === "string" ? (value as Operation) : null;
 }
 
 /** Everything wrong with a batch, without changing anything.

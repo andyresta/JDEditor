@@ -2952,16 +2952,6 @@ body.ed-resizing-cols {
   background: var(--ed-surface-3);
 }
 
-/* A hesitation. Underlined rather than coloured in, so it reads as a
-   remark about the word rather than as a selection — the two can be true
-   of the same word at once, and a selection has to stay the louder of
-   them. */
-.ed-shell .ed-word.is-filler {
-  text-decoration: underline wavy var(--ed-note-edge);
-  text-underline-offset: 3px;
-  color: var(--ed-text-dim);
-}
-
 /* The run about to be taken out, marked plainly: this is a destructive
    button's worth of selection and it should not be possible to press
    Remove without knowing exactly what goes. */
@@ -3070,6 +3060,142 @@ body.ed-resizing-cols {
 .ed-shell .ed-iconbtn.is-on {
   background: var(--ed-accent-soft);
   color: var(--ed-accent-hover);
+}
+
+/* What the agent is able to do, before anyone asks it to do anything. */
+.ed-shell .ed-agent-can-head {
+  margin: 16px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ed-shell .ed-agent-can {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ed-shell .ed-agent-can li {
+  display: flex;
+  gap: 8px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ed-text-faint);
+}
+
+.ed-shell .ed-agent-can strong {
+  flex: none;
+  width: 44px;
+  font-weight: 600;
+}
+
+/* Ready. Marked by colour rather than by a tick, because half of these
+   lines say what is missing and a tick beside those would be a lie. */
+.ed-shell .ed-agent-can li.is-on {
+  color: var(--ed-text-dim);
+}
+
+.ed-shell .ed-agent-can li.is-on strong {
+  color: var(--ed-accent-hover);
+}
+
+/* One turn of the conversation. */
+.ed-shell .ed-turn {
+  margin-bottom: 12px;
+}
+
+.ed-shell .ed-turn-said {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--ed-surface-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* What was asked, set apart from what was answered: a thread where both
+   look the same is a thread nobody can skim. */
+.ed-shell .ed-turn.is-mine .ed-turn-said {
+  background: var(--ed-accent-soft);
+}
+
+.ed-shell .ed-turn-proposed {
+  margin: 6px 0 0;
+}
+
+.ed-shell .ed-turn-who {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--ed-text-faint);
+}
+
+.ed-shell .ed-turn-thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ed-text-dim);
+}
+
+/* What the agent proposes, before anything happens to the film.
+ *
+ * Set apart from what it said in words: the words are conversation and
+ * this is a decision. Every edit is spelled out in a sentence, because
+ * approving a list of JSON is approving something nobody has read. */
+.ed-shell .ed-proposal {
+  margin-top: 8px;
+  padding: 10px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--ed-border-strong);
+  background: var(--ed-surface);
+}
+
+.ed-shell .ed-proposal h4 {
+  margin: 0 0 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ed-text-dim);
+}
+
+.ed-shell .ed-proposal-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ed-shell .ed-proposal-list li {
+  margin-bottom: 3px;
+}
+
+.ed-shell .ed-proposal-go {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+/* A proposal that cannot run. Said here rather than left to a button that
+   would fail when pressed. */
+.ed-shell .ed-proposal-no {
+  margin: 9px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ed-note-edge);
+}
+
+/* What a typed language code turns out to mean, said beside the label
+   rather than as an error: the services take codes this window may not
+   have heard of, so a name it cannot find is a remark, not a refusal. */
+.ed-shell .ed-field-said {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--ed-text-faint);
 }
 
 /* ------------------------------------------------------- AI providers */

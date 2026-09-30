@@ -1809,6 +1809,28 @@ export const AI_ROLES: { id: AiRole; label: string; what: string }[] = [
   },
 ];
 
+/** What the brain answered.
+ *
+ * `operations` are proposals, exactly as the model sent them. Nothing has
+ * been checked and nothing has been applied: the editor decides whether
+ * they make sense and a person decides whether they happen. */
+export interface AgentReply {
+  text: string;
+  operations: unknown[];
+  /** Who answered, so the panel can say so. */
+  model: string;
+}
+
+/** One turn of a conversation with the agent. */
+export interface AgentTurn {
+  role: "user" | "assistant";
+  content: string;
+  /** What this turn proposed, when it was the agent's. */
+  operations?: unknown[];
+  /** Who said it, for an agent's turn. */
+  model?: string;
+}
+
 /** One model the editor can call on.
  *
  * `hasKey` is about the provider, not this model: one key buys every
@@ -1881,15 +1903,35 @@ export interface CaptionProgress {
 
 /** The languages worth offering by name. Anything else can be had by
  * letting the service work it out, which every one of them does well. */
-export const CAPTION_LANGUAGES: { code: string; label: string }[] = [
-  { code: "", label: "Detect automatically" },
-  { code: "id", label: "Indonesian" },
-  { code: "en", label: "English" },
-  { code: "ms", label: "Malay" },
-  { code: "ja", label: "Japanese" },
-  { code: "zh", label: "Chinese" },
-  { code: "ar", label: "Arabic" },
-];
+/** What a language code amounts to, in the reader's own language.
+ *
+ * There used to be a list of six languages here, which meant that anyone
+ * recording in a seventh simply had no option to pick — while the
+ * transcription services themselves take any ISO code and handle dozens.
+ * A list written by hand serves only the languages its author happened to
+ * think of, and this editor is meant for more people than that.
+ *
+ * So there is no list. A code is typed, and this says what it means —
+ * using the table the platform already carries, which is nobody's to
+ * maintain and is itself translated.
+ *
+ * Returns null for anything that is not a language, which is how the
+ * field tells someone they have mistyped without refusing what they
+ * wrote: the services accept codes this browser may not know.
+ */
+export function languageName(code: string): string | null {
+  const wanted = code.trim();
+  if (wanted.length === 0) return null;
+  try {
+    const names = new Intl.DisplayNames(undefined, { type: "language" });
+    const said = names.of(wanted);
+    // Unknown codes come back as the code itself, which tells us nothing.
+    return said && said.toLowerCase() !== wanted.toLowerCase() ? said : null;
+  } catch {
+    // An invalid tag throws rather than answering.
+    return null;
+  }
+}
 
 /** How many words a caption may hold. Three or four is the short,
  * fast-changing style; six reads more like a subtitle. */

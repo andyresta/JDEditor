@@ -5,6 +5,7 @@ import { IMPORT_FILTERS, PROJECT_EXTENSION } from "./types";
 import type {
   AudioPeaks,
   BarSetup,
+  AgentReply,
   AiModel,
   AiRole,
   CaptionResult,
@@ -151,6 +152,17 @@ export const api = {
    * models. An empty key takes it away again. */
   saveAiKey: (provider: string, key: string) =>
     invoke<AiModel[]>("save_ai_key", { provider, key }),
+  /** Asks the chosen brain about the project.
+   *
+   * Long-running: the model reads the whole briefing before it answers,
+   * and a thinking model reading a long transcript is not quick. What
+   * comes back is a proposal — nothing is applied by asking. */
+  askAgent: (ask: {
+    briefing: string;
+    question: string;
+    history: { role: "user" | "assistant"; content: string }[];
+  }) => invoke<AgentReply>("ask_agent", { ask }),
+
   /** Marks a model as the eyes, the ears or the brain. */
   chooseAiModel: (role: AiRole, model: string) =>
     invoke<AiModel[]>("choose_ai_model", { role, model }),
