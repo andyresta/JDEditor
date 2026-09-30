@@ -28,6 +28,14 @@ import { RecordingsList } from "./RecordingsList";
 import {
   AudioPeaks,
   ClipLayout,
+  type Crop,
+  type Grade,
+  heldCrop,
+  heldGrade,
+  heldRedaction,
+  isGraded,
+  isCropped,
+  type Redaction,
   DEFAULT_EXPORT_SETTINGS,
   ExportProgress,
   ExportSettings,
@@ -53,7 +61,6 @@ import {
   TimelineTrack,
   VolumePoint,
   mediaKindFor,
-  setClipSpeed,
   newId,
   newTrack,
   newNote,
@@ -1233,22 +1240,27 @@ export function RecorderApp() {
 
   /** How fast a clip plays. Its length on the timeline changes with it,
    * and what follows it on the same track moves along. */
+  /** How fast a clip plays.
+   *
+   * Through the operations layer rather than reaching for `setClipSpeed`
+   * directly, so that the ripple a retime causes moves the notes and the
+   * transcript here exactly as it does when the agent asks for it. Two
+   * doors onto the same edit were two chances to disagree, and they did:
+   * the agent's retime carried the notes along and this one left them
+   * where they were. */
   function handleSetSpeed(clipIds: string[], speed: number) {
     if (clipIds.length === 0) return;
+    const result = applyOps({ tracks, media: projectMedia, notes, words }, [
+      { kind: "setSpeed", clipIds, speed },
+    ]);
+    if (result.problems.length > 0) {
+      setError(result.problems[0]);
+      return;
+    }
     remember(`speed:${clipIds.join(",")}`);
-    setTracks((current) => {
-      // Earliest first: each one closes up what follows it, and doing them
-      // in the order they play means a later clip is moved by the ripple
-      // of an earlier one before its own is worked out.
-      const order = current
-        .flatMap((track) => track.clips)
-        .filter((clip) => clipIds.includes(clip.id))
-        .sort((a, b) => a.startSeconds - b.startSeconds)
-        .map((clip) => clip.id);
-      let next = current;
-      for (const id of order) next = setClipSpeed(next, id, speed);
-      return next;
-    });
+    setTracks(result.doc.tracks);
+    setNotes(result.doc.notes);
+    setWords(result.doc.words);
     setIsDirty(true);
   }
 
@@ -1800,6 +1812,75 @@ export function RecorderApp() {
     return null;
   }
 
+  /** Which part of a clip's own picture is kept.
+   *
+   * Held inside the picture before it is stored, so nothing downstream —
+   * the preview, the filtergraph — ever has to wonder what a crop wider
+   * than its source means. */
+  function handleCropClip(clipId: string, crop: Crop | undefined) {
+    remember(`crop:${clipId}`);
+    setTracks((current) =>
+      current.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) =>
+          clip.id === clipId
+            ? {
+                ...clip,
+                crop: crop && isCropped(heldCrop(crop)) ? heldCrop(crop) : undefined,
+              }
+            : clip,
+        ),
+      })),
+    );
+    setIsDirty(true);
+  }
+
+  /** The rectangles covered over on a clip.
+   *
+   * Held inside the picture before they are stored, so nothing
+   * downstream has to wonder what a box hanging off the edge means. */
+  function handleRedactClip(clipId: string, boxes: Redaction[]) {
+    remember(`redact:${clipId}`);
+    setTracks((current) =>
+      current.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) =>
+          clip.id === clipId
+            ? {
+                ...clip,
+                redactions:
+                  boxes.length > 0 ? boxes.map((box) => heldRedaction(box)) : undefined,
+              }
+            : clip,
+        ),
+      })),
+    );
+    setIsDirty(true);
+  }
+
+  /** Sets a clip's colour.
+   *
+   * A grade that has come all the way back to untouched is taken off the
+   * clip rather than stored as three ones, so that a project somebody
+   * fiddled with and undid is the same file as one nobody touched — and
+   * so the export can tell the difference without comparing numbers.
+   */
+  function handleGradeClip(clipId: string, grade: Grade) {
+    remember(`grade:${clipId}`);
+    const held = heldGrade(grade);
+    setTracks((current) =>
+      current.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) =>
+          clip.id === clipId
+            ? { ...clip, grade: isGraded(held) ? held : undefined }
+            : clip,
+        ),
+      })),
+    );
+    setIsDirty(true);
+  }
+
   function handleRemoveClips(clipIds: string[]) {
     if (clipIds.length === 0) return;
     const going = new Set(clipIds);
@@ -2097,6 +2178,9 @@ export function RecorderApp() {
           words={words}
           onRemoveSpan={handleRemoveSpan}
           onApplyOperations={handleApplyOperations}
+          onCropClip={handleCropClip}
+          onRedactClip={handleRedactClip}
+          onGradeClip={handleGradeClip}
           onAutoCaption={handleAutoCaption}
           captionRun={captionRun}
           captionError={captionError}

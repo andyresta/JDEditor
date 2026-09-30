@@ -5,6 +5,7 @@ import { IMPORT_FILTERS, PROJECT_EXTENSION } from "./types";
 import type {
   AudioPeaks,
   BarSetup,
+  AgentFrame,
   AgentReply,
   AiModel,
   AiRole,
@@ -161,7 +162,17 @@ export const api = {
     briefing: string;
     question: string;
     history: { role: "user" | "assistant"; content: string }[];
+    /** Whether the model may ask to see frames. False when nothing has
+     * been marked as the eyes, and then the tool is not offered at all. */
+    canLook: boolean;
+    /** Frames it asked for last time. Empty on a first ask. */
+    frames: AgentFrame[];
   }) => invoke<AgentReply>("ask_agent", { ask }),
+
+  /** Pulls one frame out of a file. Answers with a cached image's path;
+   * asking twice about the same moment costs one decode. */
+  frameAt: (path: string, seconds: number) =>
+    invoke<string>("frame_at", { path, seconds }),
 
   /** Marks a model as the eyes, the ears or the brain. */
   chooseAiModel: (role: AiRole, model: string) =>

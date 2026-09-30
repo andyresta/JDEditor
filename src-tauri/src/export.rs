@@ -37,6 +37,21 @@ pub struct PlanClip {
     /// title, being words on a transparent sheet, is not.
     #[serde(default)]
     pub rounded: bool,
+    /// Which part of its own picture is kept, as fractions of the source.
+    ///
+    /// Absent for a clip that keeps all of it. Fractions rather than
+    /// pixels so the same crop means the same thing whatever the file's
+    /// size, which is also what lets the editor draw it without knowing
+    /// the file's dimensions.
+    #[serde(default)]
+    pub crop: Option<PlanCrop>,
+    /// Rectangles covered over, in fractions of the cropped picture.
+    #[serde(default)]
+    pub redactions: Vec<PlanRedaction>,
+    /// Its colour, as three multipliers. Absent for a clip nobody has
+    /// graded, which is nearly all of them.
+    #[serde(default)]
+    pub grade: Option<PlanGrade>,
     /// How long it fades up at its start and away at its end, in its own
     /// seconds. Zero for a transition that only moves the picture, whose
     /// travelling is described by `zoom` instead, and for a plain cut.
@@ -79,6 +94,47 @@ pub struct PlanZoomPoint {
     pub scale: f64,
     pub x: f64,
     pub y: f64,
+}
+
+/// Which part of a clip's picture to keep, in fractions of the source.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanCrop {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// A rectangle covered over so what is under it never reaches the file.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanRedaction {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// "blur" or "solid". Anything else is treated as solid: a covering
+    /// this end does not recognise must not quietly become no covering
+    /// at all, and the safer of the two is the one that leaves nothing.
+    #[serde(default)]
+    pub style: String,
+    /// How soft the blur is, as a fraction of the box's shorter side.
+    #[serde(default)]
+    pub softness: Option<f64>,
+    /// How round the corners are, as a fraction of the box's shorter
+    /// side. Zero is square.
+    #[serde(default)]
+    pub radius: Option<f64>,
+}
+
+/// The three colour dials, each a multiplier where one is untouched.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanGrade {
+    pub brightness: f64,
+    pub contrast: f64,
+    pub saturation: f64,
 }
 
 /// A rectangle inside the frame, in the frame's own pixels.
@@ -372,6 +428,195 @@ fn rounded_alpha(radius: f64, layer_width: f64) -> String {
     )
 }
 
+/// Whether a crop actually takes anything off.
+///
+/// A crop of the whole picture is not written into the graph at all: an
+/// extra filter on every clip in every export, doing nothing, is a cost
+/// and a thing that can go wrong.
+fn is_cropped(crop: &PlanCrop) -> bool {
+    crop.x > 1e-6 || crop.y > 1e-6 || crop.width < 1.0 - 1e-6 || crop.height < 1.0 - 1e-6
+}
+
+/// The filters that cover a clip's redacted rectangles.
+///
+/// Each box splits the picture in two, crops the region out of one half,
+/// covers it, and lays it back over the other half at the same place. The
+/// result carries a label so the next box — or the rest of the chain —
+/// can pick it up.
+///
+/// Written in `iw`/`ih` and `main_w`/`main_h` so ffmpeg does the
+/// arithmetic against whatever size the frame turns out to be, which is
+/// the only way this can be spliced in without the editor knowing the
+/// file's dimensions. `trunc(.../2)*2` throughout because an odd width
+/// cannot be cropped cleanly out of a chroma-subsampled frame.
+///
+/// A blur is a smearing of the pixels that were there, and a light one
+/// can sometimes be undone. `drawbox ... t=fill` puts them beyond
+/// recovery, which is what anything that must not escape deserves.
+fn redaction_chain(index: usize, boxes: &[PlanRedaction]) -> String {
+    let mut out = String::new();
+    for (i, box_) in boxes.iter().enumerate() {
+        if box_.width <= 0.0 || box_.height <= 0.0 {
+            continue;
+        }
+
+        // Both styles take the same shape: crop the region out, cover it,
+        // and lay it back. A solid fill used to be painted straight on
+        // with `drawbox`, which is simpler but cannot have round corners
+        // — and a rectangle that can be rounded in one style and not the
+        // other is a setting that lies about what it does.
+        let covering = if box_.style == "blur" {
+            let softness = box_
+                .softness
+                .filter(|s| s.is_finite() && *s > 0.0)
+                .unwrap_or(1.0 / 6.0)
+                .clamp(1.0 / 40.0, 0.4);
+            // The radius follows the box's shorter side, so a setting
+            // that looks right on a small box looks right on a large one.
+            // The chroma and alpha radii are set rather than left to
+            // follow the luma one. Left alone, ffmpeg derives them and
+            // then refuses the whole graph — "Invalid chroma_param
+            // radius value 36, must be < 36" — for any softness past
+            // about a fifth. Divided down, two fifths is accepted at
+            // every box size tried, and half is refused at all of them,
+            // which is where the ceiling above comes from.
+            format!(
+                "boxblur=luma_radius='min(w\\,h)*{softness:.4}':\
+                 chroma_radius='min(w\\,h)*{softness:.4}/5':\
+                 alpha_radius='min(w\\,h)*{softness:.4}/5':luma_power=3"
+            )
+        } else {
+            "drawbox=x=0:y=0:w=iw:h=ih:color=black@1:t=fill".to_string()
+        };
+
+        // Round corners, when asked for. The mask is built on the cropped
+        // piece, so `W` and `H` inside it are the box's own size and the
+        // radius can be written against them.
+        let radius = box_
+            .radius
+            .filter(|r| r.is_finite() && *r > 0.0)
+            .map(|r| r.clamp(0.0, 0.5));
+        let rounding = match radius {
+            Some(r) => format!(
+                ",split[rs{index}_{i}][rq{index}_{i}];\
+                 [rq{index}_{i}]trim=end_frame=1,format=gray,\
+                 geq=lum='{alpha}'[rn{index}_{i}];\
+                 [rs{index}_{i}][rn{index}_{i}]alphamerge",
+                index = index,
+                i = i,
+                alpha = rounded_box_alpha(r),
+            ),
+            None => String::new(),
+        };
+
+        out.push_str(&format!(
+            "split[rk{index}_{i}][rc{index}_{i}];\
+             [rc{index}_{i}]crop=w='trunc(iw*{w:.6}/2)*2':h='trunc(ih*{h:.6}/2)*2':\
+             x='trunc(iw*{x:.6}/2)*2':y='trunc(ih*{y:.6}/2)*2',\
+             format=rgba,{covering}{rounding}[rb{index}_{i}];\
+             [rk{index}_{i}][rb{index}_{i}]overlay=x='trunc(main_w*{x:.6}/2)*2':\
+             y='trunc(main_h*{y:.6}/2)*2'[rm{index}_{i}];[rm{index}_{i}]",
+            index = index,
+            i = i,
+            x = box_.x,
+            y = box_.y,
+            w = box_.width,
+            h = box_.height,
+            covering = covering,
+            rounding = rounding,
+        ));
+    }
+    out
+}
+
+/// The clip's colour, as filters — empty when nothing has been moved.
+///
+/// The three have to agree with what the preview draws, which is CSS's
+/// `brightness()`, `contrast()` and `saturate()` in that order. Two of
+/// them have a ready-made equivalent here and one does not:
+///
+/// * `brightness(b)` is every channel times `b`, which is exactly what
+///   `colorchannelmixer` does. Measured against CSS's own formula on five
+///   known colours at three settings, the worst channel was two levels
+///   out — and a plain trip through the colour space with no filter at
+///   all is already two.
+/// * `saturate(s)` is **not** ffmpeg's `eq=saturation` either. That one
+///   scales the chroma of a YUV picture, and CSS multiplies sRGB by a
+///   three-by-three matrix the filter spec writes out. On a flat yellow
+///   at the top of the dial the two disagreed by a hundred and ninety
+///   levels — not a shade apart, a different colour. So the spec's matrix
+///   is given to `colorchannelmixer`, which takes all nine terms.
+/// * `contrast(c)` is **not** ffmpeg's `eq=contrast`. CSS pivots each
+///   channel about its own midpoint — `(x - 0.5) * c + 0.5` — while `eq`
+///   pivots on luma, and the two came out thirty-four levels apart at
+///   0.6 and fifty at 1.6: a visibly different picture, not a rounding
+///   difference. So the CSS formula is written out by hand with `lutrgb`,
+///   which brings it back to within four.
+///
+/// A dial left alone contributes nothing at all rather than an identity
+/// filter. An identity filter is not free: it is another pass, and the
+/// conversions around it cost a level on their own.
+fn grade_chain(grade: &Option<PlanGrade>) -> String {
+    let Some(grade) = grade else {
+        return String::new();
+    };
+    // The same clamp and the same epsilon as `heldGrade` and `isGraded`
+    // in types.ts. Numbers arriving from a saved project have been
+    // through a file and may be anything at all.
+    let held = |n: f64| if n.is_finite() { n.clamp(0.0, 2.0) } else { 1.0 };
+    let moved = |n: f64| (n - 1.0).abs() > 0.001;
+
+    let brightness = held(grade.brightness);
+    let contrast = held(grade.contrast);
+    let saturation = held(grade.saturation);
+
+    let mut out = String::new();
+    if moved(brightness) {
+        out.push_str(&format!(
+            "colorchannelmixer=rr={b:.4}:gg={b:.4}:bb={b:.4},",
+            b = brightness
+        ));
+    }
+    if moved(contrast) {
+        // 127.5 rather than 128: CSS pivots at 0.5, which on a byte is
+        // halfway between 127 and 128. Rounding it to either one leaves
+        // the whole picture half a level off.
+        let leg = format!("'clip((val-127.5)*{contrast:.4}+127.5,0,255)'");
+        out.push_str(&format!("lutrgb=r={leg}:g={leg}:b={leg},"));
+    }
+    if moved(saturation) {
+        // The matrix out of the Filter Effects spec, written the long
+        // way so it can be read against the spec rather than trusted.
+        let s = saturation;
+        out.push_str(&format!(
+            "colorchannelmixer=rr={rr:.4}:rg={rg:.4}:rb={rb:.4}:gr={gr:.4}:gg={gg:.4}:gb={gb:.4}:br={br:.4}:bg={bg:.4}:bb={bb:.4},",
+            rr = 0.213 + 0.787 * s,
+            rg = 0.715 - 0.715 * s,
+            rb = 0.072 - 0.072 * s,
+            gr = 0.213 - 0.213 * s,
+            gg = 0.715 + 0.285 * s,
+            gb = 0.072 - 0.072 * s,
+            br = 0.213 - 0.213 * s,
+            bg = 0.715 - 0.715 * s,
+            bb = 0.072 + 0.928 * s,
+        ));
+    }
+    out
+}
+
+/// The alpha of a rounded rectangle, written against the piece's own size.
+///
+/// The same shape as `rounded_alpha`, but with the radius measured from
+/// the piece rather than handed in as pixels: this runs on a region
+/// cropped out of a frame nobody has measured, so `W` and `H` are the
+/// only sizes available.
+fn rounded_box_alpha(fraction: f64) -> String {
+    let r = format!("(min(W\\,H)*{fraction:.4})");
+    format!(
+        "clip(255*({r}+0.5-hypot(max(max({r}-X,X-(W-1-{r})),0),max(max({r}-Y,Y-(H-1-{r})),0))),0,255)"
+    )
+}
+
 fn build_args(plan: &ExportPlan) -> Result<Vec<String>, String> {
     if plan.clips.is_empty() {
         return Err("There is nothing on the timeline to export.".to_string());
@@ -457,6 +702,43 @@ fn build_args(plan: &ExportPlan) -> Result<Vec<String>, String> {
             // A clip that zooms is scaled afresh on every frame; one that
             // holds still is scaled once, which is far cheaper and is what
             // nearly every clip does.
+            // The crop comes first, before anything else touches the
+            // picture.
+            //
+            // Before the scaling because the scale is chosen to fill the
+            // stage: cropping after it would scale the whole picture up
+            // and then throw part of it away, leaving the kept part
+            // smaller than it was asked to be. Before the rounding
+            // because the corners belong to the layer as it is drawn, not
+            // to the part of the file it came from — a crop taken out of
+            // the middle of a recording has four square corners of its
+            // own, and rounding them first would round the wrong ones.
+            //
+            // Written in `iw`/`ih` so ffmpeg does the arithmetic against
+            // whatever the file turns out to be; the editor never needs
+            // to know the source's size. `trunc(.../2)*2` because an odd
+            // width cannot be encoded.
+            let cropping = match clip.crop {
+                Some(crop) if is_cropped(&crop) => format!(
+                    "crop=w='trunc(iw*{:.6}/2)*2':h='trunc(ih*{:.6}/2)*2':x='trunc(iw*{:.6}/2)*2':y='trunc(ih*{:.6}/2)*2',",
+                    crop.width, crop.height, crop.x, crop.y,
+                ),
+                _ => String::new(),
+            };
+
+            // After the crop, so a box drawn on what somebody saw lands
+            // where they drew it, and before the scaling so the blur is
+            // worked at the picture's own resolution rather than at
+            // whatever size the stage happens to be.
+            let covering = redaction_chain(index, &clip.redactions);
+
+            // Before the covering, because a covering is drawn on top of
+            // the picture rather than being part of it: a black fill has
+            // to stay black however the footage under it is graded, and
+            // in the preview it does, being a box laid over the video
+            // rather than anything the video's own filter can reach.
+            let grading = grade_chain(&clip.grade);
+
             let sizing = if zooms {
                 // Worked in the clip's own time: `setpts` has already put
                 // its first frame at zero, and the scaling happens before
@@ -554,13 +836,16 @@ fn build_args(plan: &ExportPlan) -> Result<Vec<String>, String> {
                 // come after the corners: `alphamerge` sets the alpha
                 // outright, so a fade applied before it would be thrown
                 // away by the mask.
-                "[{input}:v]trim=start={trim:.4}:duration={dur:.4},{pacing},{freeze}format=rgba{rounding}{fades}{sizing},setsar=1,fps={fps},tpad=start_duration={start:.4}:start_mode=add:color=black@0[v{index}]",
+                "[{input}:v]trim=start={trim:.4}:duration={dur:.4},{pacing},{freeze}{cropping}{grading}{covering}format=rgba{rounding}{fades}{sizing},setsar=1,fps={fps},tpad=start_duration={start:.4}:start_mode=add:color=black@0[v{index}]",
                 input = input,
                 index = index,
                 trim = clip.trim_start,
                 dur = material,
                 pacing = pacing,
                 freeze = freeze,
+                cropping = cropping,
+                grading = grading,
+                covering = covering,
                 rounding = rounding,
                 fades = fades,
                 sizing = sizing,
@@ -851,6 +1136,9 @@ mod tests {
             visual: true,
             audible: true,
             still: false,
+            crop: None,
+            redactions: Vec::new(),
+            grade: None,
             rounded: false,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -909,6 +1197,241 @@ mod tests {
         assert!(graph.contains("x=960.00-overlay_w/2"), "{graph}");
         // It waits its turn rather than starting at zero.
         assert!(graph.contains("tpad=start_duration=2.0000"), "{graph}");
+    }
+
+    fn redaction(style: &str, x: f64, y: f64, w: f64, h: f64) -> PlanRedaction {
+        PlanRedaction {
+            x,
+            y,
+            width: w,
+            height: h,
+            style: style.to_string(),
+            softness: None,
+            radius: None,
+        }
+    }
+
+    /// A clip with nothing to hide gains no filters at all. An extra
+    /// split and overlay on every clip of every export, doing nothing, is
+    /// both a cost and a thing that can go wrong.
+    #[test]
+    fn a_clip_with_nothing_hidden_gains_no_filters() {
+        assert_eq!(redaction_chain(0, &[]), "");
+    }
+
+    /// The blur splits the picture, covers a piece of it, and puts it
+    /// back — and hands on a label for whatever comes next.
+    #[test]
+    fn a_blurred_box_splits_covers_and_rejoins() {
+        let chain = redaction_chain(2, &[redaction("blur", 0.1, 0.2, 0.3, 0.4)]);
+        assert!(chain.contains("split[rk2_0][rc2_0]"), "{chain}");
+        assert!(chain.contains("boxblur"), "{chain}");
+        assert!(chain.contains("overlay=x="), "{chain}");
+        // Ends on a label the rest of the chain can pick up.
+        assert!(chain.ends_with("[rm2_0]"), "{chain}");
+        // The same fractions in the crop and in the overlay, or the
+        // covered piece would be laid back somewhere other than where it
+        // came from.
+        assert!(chain.contains("x='trunc(iw*0.100000/2)*2'"), "{chain}");
+        assert!(chain.contains("x='trunc(main_w*0.100000/2)*2'"), "{chain}");
+    }
+
+    /// A solid fill goes through the same crop-and-overlay as a blur,
+    /// so that it can have the same round corners. Painting it straight
+    /// on with `drawbox` was simpler and could only ever be square.
+    #[test]
+    fn a_solid_box_is_covered_the_same_way_a_blur_is() {
+        let chain = redaction_chain(0, &[redaction("solid", 0.1, 0.2, 0.3, 0.4)]);
+        assert!(chain.contains("drawbox"), "{chain}");
+        assert!(chain.contains("t=fill"), "{chain}");
+        assert!(chain.contains("split"), "{chain}");
+        assert!(chain.ends_with("[rm0_0]"), "{chain}");
+    }
+
+    /// The softness is written into the blur's radius, against the box's
+    /// own shorter side rather than in pixels.
+    #[test]
+    fn softness_reaches_the_blur() {
+        let mut soft = redaction("blur", 0.1, 0.1, 0.4, 0.4);
+        soft.softness = Some(0.4);
+        let chain = redaction_chain(0, &[soft]);
+        assert!(chain.contains("min(w\\,h)*0.4000"), "{chain}");
+
+        // Out of range is brought back rather than passed on: a radius of
+        // a thousand would take minutes and blur the whole frame.
+        let mut wild = redaction("blur", 0.1, 0.1, 0.4, 0.4);
+        wild.softness = Some(50.0);
+        assert!(redaction_chain(0, &[wild]).contains("*0.4000"));
+        let mut nothing = redaction("blur", 0.1, 0.1, 0.4, 0.4);
+        nothing.softness = Some(0.0);
+        assert!(redaction_chain(0, &[nothing]).contains("*0.1667"));
+    }
+
+    fn grade(brightness: f64, contrast: f64, saturation: f64) -> Option<PlanGrade> {
+        Some(PlanGrade { brightness, contrast, saturation })
+    }
+
+    /// A clip nobody has graded carries no colour filter at all. Not an
+    /// identity one: every filter is another pass, and the conversions
+    /// around it shift the picture a level on their own.
+    #[test]
+    fn an_untouched_clip_costs_nothing() {
+        assert_eq!(grade_chain(&None), "");
+        assert_eq!(grade_chain(&grade(1.0, 1.0, 1.0)), "");
+        // And a dial that has drifted a ten-thousandth off one is still
+        // untouched, so a slider reporting 0.9999 costs nothing either.
+        assert_eq!(grade_chain(&grade(1.0001, 0.9999, 1.0)), "");
+    }
+
+    /// Only the dials that were moved appear, in CSS's order:
+    /// brightness, then contrast, then saturation.
+    #[test]
+    fn only_what_was_moved_is_written_and_in_order() {
+        assert_eq!(
+            grade_chain(&grade(1.2, 1.0, 1.0)),
+            "colorchannelmixer=rr=1.2000:gg=1.2000:bb=1.2000,"
+        );
+        // Every term of the spec's matrix at half saturation, and
+        // nothing else: no brightness, no contrast.
+        assert_eq!(
+            grade_chain(&grade(1.0, 1.0, 0.5)),
+            concat!(
+                "colorchannelmixer=",
+                "rr=0.6065:rg=0.3575:rb=0.0360:",
+                "gr=0.1065:gg=0.8575:gb=0.0360:",
+                "br=0.1065:bg=0.3575:bb=0.5360,",
+            )
+        );
+
+        let all = grade_chain(&grade(1.2, 0.8, 1.4));
+        let b = all.find("colorchannelmixer").unwrap();
+        let c = all.find("lutrgb").unwrap();
+        // Both brightness and saturation are colorchannelmixers; the
+        // saturation one is the second, and the only one with off
+        // diagonal terms.
+        let sat = all.find("rg=").unwrap();
+        assert!(b < c && c < sat, "{all}");
+        assert!(all.ends_with(","), "it has to join the chain that follows: {all}");
+    }
+
+    /// Contrast is spelled out rather than handed to `eq`, which pivots
+    /// on luma and lands a different picture. The pivot is 127.5 — CSS's
+    /// 0.5 on a byte — and rounding it to 127 or 128 would leave the
+    /// whole frame half a level off.
+    #[test]
+    fn contrast_is_the_css_formula_not_ffmpegs() {
+        let chain = grade_chain(&grade(1.0, 1.6, 1.0));
+        assert!(!chain.contains("eq=contrast"), "{chain}");
+        for channel in ["r=", "g=", "b="] {
+            assert!(
+                chain.contains(&format!("{channel}'clip((val-127.5)*1.6000+127.5,0,255)'")),
+                "{channel}: {chain}"
+            );
+        }
+    }
+
+    /// The exact chain a render was measured through.
+    ///
+    /// These three settings were pushed through ffmpeg on five known
+    /// colours and compared against what CSS's own formulas give, and
+    /// they agreed to within four levels of 255 — the chain with no
+    /// grade at all is already two out, the colour space costing that
+    /// much on its own. The probe carries this same string; if either
+    /// side is changed without the other, one of the two stops matching
+    /// and the measurement is known to be stale rather than quietly
+    /// describing a chain that no longer exists.
+    #[test]
+    fn the_chain_that_was_measured() {
+        assert_eq!(
+            grade_chain(&grade(1.2, 1.3, 0.7)),
+            concat!(
+                "colorchannelmixer=rr=1.2000:gg=1.2000:bb=1.2000,",
+                "lutrgb=r='clip((val-127.5)*1.3000+127.5,0,255)':",
+                "g='clip((val-127.5)*1.3000+127.5,0,255)':",
+                "b='clip((val-127.5)*1.3000+127.5,0,255)',",
+                "colorchannelmixer=rr=0.7639:rg=0.2145:rb=0.0216:",
+                "gr=0.0639:gg=0.9145:gb=0.0216:",
+                "br=0.0639:bg=0.2145:bb=0.7216,",
+            )
+        );
+    }
+
+    /// A number out of a saved file may be anything at all. It is brought
+    /// back into range rather than passed on.
+    #[test]
+    fn wild_numbers_are_brought_back() {
+        assert!(grade_chain(&grade(500.0, 1.0, 1.0)).contains("rr=2.0000"));
+        assert!(grade_chain(&grade(-3.0, 1.0, 1.0)).contains("rr=0.0000"));
+        // Saturation at two: the spec's matrix with s = 2.
+        assert!(grade_chain(&grade(1.0, f64::NAN, 9.0)).contains("rr=1.7870"));
+        assert!(!grade_chain(&grade(1.0, f64::NAN, 9.0)).contains("lutrgb"));
+    }
+
+    /// Square unless asked otherwise, and rounded through a mask when it
+    /// is — for either style.
+    #[test]
+    fn corners_are_rounded_only_when_asked() {
+        let plain = redaction_chain(0, &[redaction("blur", 0.1, 0.1, 0.4, 0.4)]);
+        assert!(!plain.contains("alphamerge"), "{plain}");
+
+        for style in ["blur", "solid"] {
+            let mut round = redaction(style, 0.1, 0.1, 0.4, 0.4);
+            round.radius = Some(0.25);
+            let chain = redaction_chain(0, &[round]);
+            assert!(chain.contains("alphamerge"), "{style}: {chain}");
+            assert!(chain.contains("geq=lum="), "{style}: {chain}");
+            assert!(chain.contains("*0.2500"), "{style}: {chain}");
+        }
+    }
+
+    /// A style this version does not know must not quietly become no
+    /// covering at all. It is filled, which is the safer of the two.
+    #[test]
+    fn an_unknown_style_is_filled_rather_than_ignored() {
+        let chain = redaction_chain(0, &[redaction("frosted-glass", 0.1, 0.1, 0.2, 0.2)]);
+        assert!(chain.contains("drawbox"), "{chain}");
+        assert!(chain.contains("t=fill"), "{chain}");
+        let empty = redaction_chain(0, &[redaction("", 0.1, 0.1, 0.2, 0.2)]);
+        assert!(empty.contains("t=fill"), "{empty}");
+    }
+
+    /// Several boxes chain one into the next, each with labels of its own.
+    #[test]
+    fn boxes_chain_without_their_labels_colliding() {
+        let chain = redaction_chain(1, &[
+            redaction("blur", 0.0, 0.0, 0.2, 0.2),
+            redaction("blur", 0.5, 0.5, 0.2, 0.2),
+        ]);
+        for label in ["[rk1_0]", "[rb1_0]", "[rm1_0]", "[rk1_1]", "[rb1_1]", "[rm1_1]"] {
+            assert!(chain.contains(label), "{label} missing from {chain}");
+        }
+        assert!(chain.ends_with("[rm1_1]"), "{chain}");
+    }
+
+    /// A box with no size is left out rather than written as a filter
+    /// asking for a zero-wide crop, which ffmpeg refuses outright.
+    #[test]
+    fn a_box_with_no_size_is_left_out() {
+        assert_eq!(redaction_chain(0, &[redaction("blur", 0.1, 0.1, 0.0, 0.3)]), "");
+        assert_eq!(redaction_chain(0, &[redaction("solid", 0.1, 0.1, 0.3, 0.0)]), "");
+    }
+
+    /// And the whole graph ffmpeg is handed still parses with one in it.
+    #[test]
+    fn a_graph_with_a_covered_box_is_accepted() {
+        let mut p = plan("mp4", vec![clip("a.mp4", 0.0, 4.0)]);
+        p.clips[0].redactions = vec![redaction("blur", 0.1, 0.1, 0.3, 0.3)];
+        let args = build_args(&p).expect("args");
+        let graph = args.join(" ");
+        assert!(graph.contains("boxblur"), "{graph}");
+        // Before the scaling, so the blur is worked at the picture's own
+        // resolution rather than at whatever size the stage happens to
+        // be. Measured against `scale=` rather than against `format=rgba`:
+        // the covering carries a format of its own now, so the first one
+        // in the graph is inside the covering and says nothing.
+        let blur_at = graph.find("boxblur").unwrap();
+        let scale_at = graph.find("scale=").unwrap();
+        assert!(blur_at < scale_at, "the covering has to happen before the scaling: {graph}");
     }
 
     #[test]

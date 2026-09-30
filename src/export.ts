@@ -2,6 +2,11 @@ import { api } from "./api";
 import { drawBackdrop, frameGeometry, hasBackdrop } from "./frame";
 import { drawTextLayer } from "./textLayer";
 import {
+  cropOf,
+  gradeOf,
+  isCropped,
+  isGraded,
+  redactionsOf,
   FULL_FRAME_LAYOUT,
   gainAt,
   holdForTransition,
@@ -388,6 +393,14 @@ export function buildExportPlan(
         x: layout.x,
         y: layout.y,
         volume: sampleVolume(clip.volume),
+        // Only when it takes something off. A crop of the whole picture
+        // is an extra filter on every clip of every export doing nothing.
+        crop: isCropped(cropOf(clip)) ? cropOf(clip) : undefined,
+        redactions:
+          redactionsOf(clip).length > 0 ? redactionsOf(clip) : undefined,
+        // Same reasoning as the crop: a clip nobody has graded should
+        // not carry three filters doing nothing on every frame.
+        grade: isGraded(gradeOf(clip)) ? gradeOf(clip) : undefined,
         zoom,
       });
     }

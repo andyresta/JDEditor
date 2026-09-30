@@ -327,6 +327,19 @@ async fn speech_engines(app: tauri::AppHandle) -> Result<Vec<caption::EngineInfo
     blocking(move || Ok(caption::engines(&app))).await?
 }
 
+/// Pulls a single frame out of a file, for something to look at.
+///
+/// Answers with the path of a cached image. Asking twice about the same
+/// moment costs one decode.
+#[tauri::command]
+async fn frame_at(
+    app: tauri::AppHandle,
+    path: String,
+    seconds: f64,
+) -> Result<String, String> {
+    blocking(move || media::frame_at(&app, &path, seconds)).await?
+}
+
 /// Asks the chosen brain about the project.
 ///
 /// Long-running, and deliberately so: the model reads the whole briefing
@@ -396,6 +409,7 @@ pub fn run() {
         .manage(export::ExportState::default())
         .invoke_handler(tauri::generate_handler![
             ask_agent,
+            frame_at,
             ai_models,
             save_ai_key,
             choose_ai_model,

@@ -121,6 +121,92 @@ mod tests {
 
 /// Extracts a single frame ~1s into the clip as a small JPEG, cached under
 /// the app's cache directory so re-opening the same file is instant.
+/// How wide a frame is made for a model to look at.
+///
+/// Wide enough to read a line of text in a screen recording, small enough
+/// that a handful of them is not a bill. A model charges by the size of
+/// the picture, and one at the full width of a 4K recording costs several
+/// times what it is worth for "what is on screen here".
+const LOOK_WIDTH: u32 = 960;
+
+/// A single frame from a moment in a file.
+///
+/// The thumbnail generator with the second it takes made an argument:
+/// that one is fixed at a second in and 320 pixels wide, because it is
+/// for a row in a list. This one is for being looked at.
+///
+/// `-ss` before `-i` on purpose — it seeks to roughly the right place and
+/// decodes from there, rather than decoding from the beginning of the
+/// file and throwing the result away. On an hour-long recording that is
+/// the difference between a moment and a minute.
+///
+/// Kept in the cache under the moment it came from, so asking twice about
+/// the same second costs one decode.
+pub fn frame_at(app: &tauri::AppHandle, path: &str, seconds: f64) -> Result<String, String> {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err("A frame has to come from a moment in the file.".to_string());
+    }
+
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("frames");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+
+    // The file and the moment together, so two files that happen to share
+    // a name cannot be handed each other's frames.
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("frame");
+    let safe: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let out_path: PathBuf = cache_dir.join(format!(
+        "{safe}-{}-{:.3}.jpg",
+        short_hash(path),
+        seconds
+    ));
+
+    if out_path.exists() {
+        return Ok(out_path.to_string_lossy().to_string());
+    }
+
+    let output = crate::sidecar::command("ffmpeg")
+        .args(["-y", "-ss", &format!("{seconds:.3}"), "-i", path])
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            &format!("scale={LOOK_WIDTH}:-2"),
+            "-q:v",
+            "5",
+        ])
+        .arg(&out_path)
+        .output()
+        .map_err(|e| format!("failed to run ffmpeg: {e}"))?;
+
+    if !output.status.success() || !out_path.exists() {
+        // A moment past the end of the file is the usual reason, and it
+        // is worth saying which moment rather than "it failed".
+        return Err(format!(
+            "No frame could be taken from {path} at {seconds:.2}s."
+        ));
+    }
+
+    Ok(out_path.to_string_lossy().to_string())
+}
+
+/// Enough of a hash to tell two paths apart in a file name.
+fn short_hash(text: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    format!("{:08x}", hasher.finish() as u32)
+}
+
 fn generate_thumbnail(app: &tauri::AppHandle, path: &str) -> Result<String, String> {
     let cache_dir = app
         .path()

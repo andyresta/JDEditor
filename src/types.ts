@@ -260,6 +260,13 @@ export interface TimelineClip {
   text?: TextStyle;
   /** Silenced by hand, from the clip's own menu. */
   muted?: boolean;
+  /** Which part of its own picture is kept. Absent means all of it. */
+  crop?: Crop;
+  /** Rectangles covered over so what is under them never reaches the
+   * file. Absent for a clip with nothing to hide. */
+  redactions?: Redaction[];
+  /** Its colour, as three dials. Absent means untouched. */
+  grade?: Grade;
   /** The clip's volume line, sorted by time. Absent — or empty — means a
    * flat line at full volume. One point is an overall level; two or more
    * make an envelope that ramps between them. */
@@ -298,6 +305,233 @@ export interface TimelineClip {
  * than pixels: the preview is whatever size the window leaves it, and a
  * layout written in pixels would mean something different every time the
  * window was resized. */
+/** Which part of a clip's own picture is kept.
+ *
+ * Fractions of the source, not pixels: a project holding a 4K recording
+ * beside a 720p one would otherwise need two sets of numbers meaning the
+ * same thing, and a crop would stop meaning what it meant when the file
+ * behind it was relinked to a different size.
+ *
+ * `x` and `y` are the top-left corner, `width` and `height` how much is
+ * kept. The whole picture is `{ x: 0, y: 0, width: 1, height: 1 }`, which
+ * is what a clip with no crop on it is treated as.
+ */
+export interface Crop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export const WHOLE_PICTURE: Crop = { x: 0, y: 0, width: 1, height: 1 };
+
+/** The smallest crop worth having. Below this the handles are on top of
+ * each other and there is nothing left to see. */
+export const MIN_CROP = 0.05;
+
+/** A clip's crop, or the whole picture when it has none. */
+export function cropOf(clip: TimelineClip): Crop {
+  return clip.crop ?? WHOLE_PICTURE;
+}
+
+/** Whether a crop actually takes anything off. */
+export function isCropped(crop: Crop): boolean {
+  return (
+    crop.x > 1e-6 ||
+    crop.y > 1e-6 ||
+    crop.width < 1 - 1e-6 ||
+    crop.height < 1 - 1e-6
+  );
+}
+
+/** Keeps a crop inside the picture and no smaller than it is worth.
+ *
+ * Every edge is held before the size is, so dragging a handle past the
+ * far side of the picture stops at the edge rather than turning the
+ * rectangle inside out.
+ */
+export function heldCrop(crop: Crop): Crop {
+  const x = Math.min(Math.max(crop.x, 0), 1 - MIN_CROP);
+  const y = Math.min(Math.max(crop.y, 0), 1 - MIN_CROP);
+  const width = Math.min(Math.max(crop.width, MIN_CROP), 1 - x);
+  const height = Math.min(Math.max(crop.height, MIN_CROP), 1 - y);
+  return { x, y, width, height };
+}
+
+/** The shape a clip is drawn at, after its crop.
+ *
+ * A 16:9 recording cropped to its middle third is no longer 16:9, and the
+ * box it is drawn in has to follow or the picture inside it is squashed.
+ * Null when the file has not said how big it is yet.
+ */
+export function croppedShape(
+  clip: TimelineClip,
+  width: number | null | undefined,
+  height: number | null | undefined,
+): { width: number; height: number } | null {
+  if (!width || !height) return null;
+  const crop = cropOf(clip);
+  return { width: width * crop.width, height: height * crop.height };
+}
+
+/** A rectangle covered over, to keep what is under it out of the film.
+ *
+ * Email addresses, API keys, client names, a face in a window. This is a
+ * safety feature rather than a decoration: somebody who publishes a
+ * screen recording with a token in it cannot take it back.
+ *
+ * Measured in fractions of the clip's picture **after its crop**, because
+ * that is what a person sees when they draw the box. Fractions rather
+ * than pixels for the same reason a crop uses them: the same box means
+ * the same thing whatever the file's size.
+ */
+export interface Redaction {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** How it is covered.
+   *
+   * A blur is softer to look at and reads as deliberate. A solid fill is
+   * the safer of the two and the only one that leaves nothing at all
+   * behind — a blur is a smearing of the pixels that were there, and a
+   * light one can sometimes be undone. Anything that must not escape
+   * should be filled, not blurred. */
+  style: "blur" | "solid";
+  /** How soft the blur is, as a fraction of the box's shorter side.
+   *
+   * Measured against the box rather than in pixels so a setting that
+   * looks right stays right on a 4K recording and a 720p one alike.
+   * Absent means the default. Ignored by a solid fill, which has nothing
+   * to soften. */
+  softness?: number;
+  /** How round the corners are, as a fraction of the box's shorter side.
+   * Zero is square, 0.5 is a full stadium. */
+  radius?: number;
+}
+
+/** The smallest box worth drawing. */
+export const MIN_REDACTION = 0.02;
+
+/** How soft a blur is unless it is told otherwise. A sixth of the box's
+ * shorter side: enough that nothing survives it, little enough that it
+ * still reads as part of the picture. */
+export const DEFAULT_SOFTNESS = 1 / 6;
+export const MIN_SOFTNESS = 1 / 40;
+/** Found by trying it: ffmpeg refuses a blur radius of half the box's
+ * shorter side, at every box size tried, and two fifths is accepted at
+ * all of them. A setting the renderer will not accept is worse than one
+ * that stops a little short of it. */
+export const MAX_SOFTNESS = 0.4;
+
+/** Corners, square unless asked for. */
+export const DEFAULT_RADIUS = 0;
+export const MAX_RADIUS = 0.5;
+
+export function softnessOf(box: Redaction): number {
+  const said = box.softness ?? DEFAULT_SOFTNESS;
+  return Math.min(MAX_SOFTNESS, Math.max(MIN_SOFTNESS, said));
+}
+
+export function radiusOf(box: Redaction): number {
+  return Math.min(MAX_RADIUS, Math.max(0, box.radius ?? DEFAULT_RADIUS));
+}
+
+export function redactionsOf(clip: TimelineClip): Redaction[] {
+  return clip.redactions ?? [];
+}
+
+/** Keeps a box inside the picture and no smaller than it is worth. */
+export function heldRedaction(box: Redaction): Redaction {
+  const x = Math.min(Math.max(box.x, 0), 1 - MIN_REDACTION);
+  const y = Math.min(Math.max(box.y, 0), 1 - MIN_REDACTION);
+  return {
+    ...box,
+    x,
+    y,
+    width: Math.min(Math.max(box.width, MIN_REDACTION), 1 - x),
+    height: Math.min(Math.max(box.height, MIN_REDACTION), 1 - y),
+  };
+}
+
+/** Colour, as three dials over the whole clip.
+ *
+ * These three earn their place in a recorder: footage shot against a
+ * bright window needs its brightness pulled down, a flat screen capture
+ * needs contrast, and a washed-out camera needs saturation. Curves,
+ * wheels and white balance are a larger tool than this and are not here.
+ *
+ * Each is a multiplier where one means untouched, so a clip nobody has
+ * graded costs nothing — neither a filter in the export nor a repaint in
+ * the preview.
+ *
+ * They are exactly CSS's `brightness()`, `contrast()` and `saturate()`,
+ * applied in that order, because the preview is written in CSS and the
+ * renderer has to reproduce whatever the preview shows. ffmpeg's own
+ * `eq=contrast` is **not** the same formula — it pivots on luma and comes
+ * out as much as fifty levels away — so the renderer spells the CSS one
+ * out by hand. See `grade_chain` in export.rs.
+ */
+export interface Grade {
+  brightness: number;
+  contrast: number;
+  saturation: number;
+}
+
+/** Untouched: what every clip has until somebody moves a dial. */
+export const NEUTRAL_GRADE: Grade = { brightness: 1, contrast: 1, saturation: 1 };
+
+/** The dials run from nothing to twice. Past twice the picture is clipped
+ * to white in every channel and moving the dial further does nothing
+ * visible, so the range stops where the effect does. */
+export const MIN_GRADE = 0;
+export const MAX_GRADE = 2;
+
+/** How far from one still counts as untouched.
+ *
+ * A slider that reports 0.9999 should not cost a filter on every frame,
+ * and both ends of the app have to agree on where the line is — this
+ * number is the same one `grade_chain` uses. */
+export const GRADE_EPSILON = 0.001;
+
+export function heldGrade(grade: Grade): Grade {
+  const held = (n: number) =>
+    Number.isFinite(n) ? Math.min(MAX_GRADE, Math.max(MIN_GRADE, n)) : 1;
+  return {
+    brightness: held(grade.brightness),
+    contrast: held(grade.contrast),
+    saturation: held(grade.saturation),
+  };
+}
+
+export function gradeOf(clip: TimelineClip): Grade {
+  return clip.grade ? heldGrade(clip.grade) : NEUTRAL_GRADE;
+}
+
+export function isGraded(grade: Grade): boolean {
+  return (
+    Math.abs(grade.brightness - 1) > GRADE_EPSILON ||
+    Math.abs(grade.contrast - 1) > GRADE_EPSILON ||
+    Math.abs(grade.saturation - 1) > GRADE_EPSILON
+  );
+}
+
+/** The grade as a CSS filter, or empty when there is nothing to do.
+ *
+ * The one place the preview's colour is written. Empty rather than
+ * `brightness(1) contrast(1) saturate(1)` because a filter — even an
+ * idle one — puts the element on its own layer and rounds its colours
+ * through the compositor. */
+export function gradeFilter(grade: Grade): string {
+  if (!isGraded(grade)) return "";
+  return [
+    `brightness(${grade.brightness})`,
+    `contrast(${grade.contrast})`,
+    `saturate(${grade.saturation})`,
+  ].join(" ");
+}
+
 export interface ClipLayout {
   x: number;
   y: number;
@@ -1038,6 +1272,57 @@ export function withSpeed(clip: TimelineClip, speed: number): TimelineClip {
  * picture. The two can be made to match by giving the sound the same
  * speed, which is a second deliberate act rather than a silent one.
  */
+/** Where a moment on the timeline ends up when a clip is retimed.
+ *
+ * A retime moves two different sets of things, and they move differently.
+ * Everything *after* the clip shifts by the room it gave up or took, the
+ * way `setClipSpeed` shifts the clips. Everything *inside* it stretches
+ * or squeezes with it: a note at four seconds into a ten-second clip is
+ * about what happens two-fifths of the way through, and when that clip
+ * plays in five seconds it is two seconds in, not four.
+ *
+ * Getting only the first half of that right leaves every note inside a
+ * retimed clip pointing at the wrong frame, which is the harder mistake
+ * to notice: the note is still roughly where it was, just no longer on
+ * the thing it was about.
+ *
+ * Null when nothing would move: the clip is gone, or it already plays at
+ * that speed.
+ */
+export function speedShift(
+  tracks: TimelineTrack[],
+  clipId: string,
+  speed: number,
+): { at: (seconds: number) => number } | null {
+  let found: TimelineClip | undefined;
+  for (const track of tracks) {
+    const match = track.clips.find((clip) => clip.id === clipId);
+    if (match) found = match;
+  }
+  if (!found) return null;
+
+  const wanted = Math.min(MAX_SPEED, Math.max(MIN_SPEED, speed));
+  if (speedOf(found) === wanted) return null;
+
+  const start = found.startSeconds;
+  const was = found.durationSeconds;
+  const now = withSpeed(found, wanted).durationSeconds;
+  const ends = start + was;
+  const delta = now - was;
+  // A thousandth of a second: a moment exactly on the clip's end belongs
+  // to what comes after it, not to the clip.
+  const touch = 1e-3;
+
+  return {
+    at: (seconds: number) => {
+      if (seconds < start) return seconds;
+      if (seconds >= ends - touch) return Math.max(0, seconds + delta);
+      if (was <= 0) return seconds;
+      return start + ((seconds - start) * now) / was;
+    },
+  };
+}
+
 export function setClipSpeed(
   tracks: TimelineTrack[],
   clipId: string,
@@ -1715,6 +2000,13 @@ export const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
 /** What the renderer is handed: placements reduced to numbers, with every
  * question about tracks, layers and decibels already answered. */
 export interface ExportPlanClip {
+  /** Which part of its own picture is kept, as fractions of the source.
+   * Absent for a clip that keeps all of it. */
+  crop?: Crop;
+  /** Rectangles covered over, in fractions of the cropped picture. */
+  redactions?: Redaction[];
+  /** Its colour. Absent for a clip nobody has graded. */
+  grade?: Grade;
   path: string;
   start: number;
   duration: number;
@@ -1819,6 +2111,18 @@ export interface AgentReply {
   operations: unknown[];
   /** Who answered, so the panel can say so. */
   model: string;
+  /** Moments on the timeline it wants to see before it can answer.
+   *
+   * Non-empty means nothing has been decided: the editor fetches these
+   * frames and asks again with them. */
+  looks: number[];
+}
+
+/** A frame handed back to the model, and where on the timeline it came
+ * from. */
+export interface AgentFrame {
+  path: string;
+  atSeconds: number;
 }
 
 /** One turn of a conversation with the agent. */

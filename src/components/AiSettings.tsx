@@ -140,6 +140,15 @@ export function AiSettings({ onClose }: { onClose: () => void }) {
           this app's own settings folder — never in a project file, and never
           shown again once entered.
         </p>
+        {/* Said here as well as beside the send box: somebody setting this
+            up for the first time is deciding whether to hand a company
+            their recordings, and that decision is made on this page. */}
+        <p className="ed-note">
+          Each of these sends something away from this machine. The ears
+          send the audio of your clips; the brain is sent the timeline and
+          the transcript. Nothing is sent until you ask for it, and a role
+          with no key chosen sends nothing at all.
+        </p>
 
         <div className="ed-engines">
           {providers.map((provider) => (

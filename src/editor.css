@@ -527,6 +527,11 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  /* What a crop is made of. The picture inside is blown up and slid so
+     that the kept rectangle fills this box; everything outside it is
+     taken away here, exactly as ffmpeg's `crop` takes it away in the
+     file. Harmless when nothing is cropped: the picture fits already. */
+  overflow: hidden;
   /* Deliberately not capped to the stage's height. A cap kept the layer
      inside the frame but left its width alone, so a clip filling the stage
      came out wider than its own shape and the video sat letterboxed inside
@@ -3198,6 +3203,236 @@ body.ed-resizing-cols {
   color: var(--ed-text-faint);
 }
 
+/* What sending actually does, and what it costs. Sits above the box
+   rather than behind a link: it is about somebody else's recordings
+   leaving their machine, and about their own money. */
+.ed-shell .ed-agent-warns {
+  margin: 0 0 8px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--ed-text-faint);
+}
+
+/* The second press. Louder, because it is a stop rather than a remark. */
+.ed-shell .ed-agent-warns.is-loud {
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: var(--ed-surface-3);
+  color: var(--ed-text-dim);
+}
+
+/* ----------------------------------------------------------- cropping */
+
+/* The whole picture, while its handles are out.
+   
+   `marks.box` gives the layer's centre rather than its corner, so it is
+   centred the way the selection ring is. `overflow: hidden` is what keeps
+   the dimming below from spilling across the rest of the stage. */
+.ed-shell .ed-crop-area {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  z-index: 30;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* The rectangle, inside the picture rather than over the layer.
+   
+   It is this that moves while the picture holds still: a crop tool that
+   applied itself as you dragged would slide the picture under the
+   rectangle and leave nothing to aim at.
+   
+   What is outside it is dimmed by a shadow large enough to cover the
+   whole picture, clipped by the area above — so what is being given up
+   stays visible while it is being given up. */
+.ed-shell .ed-crop {
+  position: absolute;
+  box-shadow:
+    0 0 0 1px var(--ed-frame-ring-out),
+    0 0 0 2px var(--ed-accent),
+    0 0 0 9999px rgba(6, 18, 12, 0.55);
+  pointer-events: none;
+}
+
+/* Thirds, the way every camera draws them. Faint: they are for lining
+   something up, not for looking at. */
+.ed-shell .ed-crop-thirds {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, transparent 33.33%, rgba(255, 255, 255, 0.35) 33.33%,
+      rgba(255, 255, 255, 0.35) calc(33.33% + 1px), transparent calc(33.33% + 1px)),
+    linear-gradient(to right, transparent 66.66%, rgba(255, 255, 255, 0.35) 66.66%,
+      rgba(255, 255, 255, 0.35) calc(66.66% + 1px), transparent calc(66.66% + 1px)),
+    linear-gradient(to bottom, transparent 33.33%, rgba(255, 255, 255, 0.35) 33.33%,
+      rgba(255, 255, 255, 0.35) calc(33.33% + 1px), transparent calc(33.33% + 1px)),
+    linear-gradient(to bottom, transparent 66.66%, rgba(255, 255, 255, 0.35) 66.66%,
+      rgba(255, 255, 255, 0.35) calc(66.66% + 1px), transparent calc(66.66% + 1px));
+}
+
+/* Eight of them: four corners and four sides. Big enough to catch with a
+   pointer, which the one-pixel edge underneath is not. */
+.ed-shell .ed-crop-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--ed-accent);
+  box-shadow: 0 0 0 1.5px var(--ed-frame-ring-out);
+  pointer-events: auto;
+}
+
+.ed-shell .ed-crop-handle.is-nw { left: -7px; top: -7px; cursor: nwse-resize; }
+.ed-shell .ed-crop-handle.is-ne { right: -7px; top: -7px; cursor: nesw-resize; }
+.ed-shell .ed-crop-handle.is-sw { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.ed-shell .ed-crop-handle.is-se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+
+/* The sides are bars rather than squares: an edge is dragged along its
+   whole length, and a square in the middle of it says otherwise. */
+.ed-shell .ed-crop-handle.is-n,
+.ed-shell .ed-crop-handle.is-s {
+  left: 50%;
+  width: 34px;
+  height: 10px;
+  margin-left: -17px;
+  cursor: ns-resize;
+}
+.ed-shell .ed-crop-handle.is-n { top: -5px; }
+.ed-shell .ed-crop-handle.is-s { bottom: -5px; }
+
+.ed-shell .ed-crop-handle.is-w,
+.ed-shell .ed-crop-handle.is-e {
+  top: 50%;
+  width: 10px;
+  height: 34px;
+  margin-top: -17px;
+  cursor: ew-resize;
+}
+.ed-shell .ed-crop-handle.is-w { left: -5px; }
+.ed-shell .ed-crop-handle.is-e { right: -5px; }
+
+/* A toolbar chip that is doing something, so the mode is visible without
+   hunting for the handles. */
+.ed-shell .ed-chipbtn.is-active {
+  background: var(--ed-accent-soft);
+  color: var(--ed-accent-hover);
+  border-color: var(--ed-accent);
+}
+
+/* -------------------------------------------------------- blur areas */
+
+/* A covered rectangle, as the preview shows it.
+ *
+ * Inside the layer, so a crop clips it the same way the filtergraph does.
+ * `backdrop-filter` blurs what is behind it rather than itself, which is
+ * the same thing ffmpeg does with a split and an overlay. */
+.ed-shell .ed-covered {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.ed-shell .ed-covered.is-blur {
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+/* The safe one. Black on both sides, and nothing of what was underneath
+   survives it in either. */
+.ed-shell .ed-covered.is-solid {
+  background: #000;
+}
+
+/* The picture, while boxes are being drawn on it. */
+.ed-shell .ed-redact-area {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  z-index: 30;
+  overflow: hidden;
+  cursor: crosshair;
+  box-shadow: 0 0 0 1.5px var(--ed-accent);
+}
+
+.ed-shell .ed-redact-hint {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(6, 18, 12, 0.72);
+  color: #fff;
+  font-size: 11.5px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* One box, while it is being worked on. Outlined rather than filled, so
+   what is underneath can still be seen well enough to aim at — the
+   covering itself is drawn by `.ed-covered` under this. */
+.ed-shell .ed-redact {
+  position: absolute;
+  cursor: move;
+  box-shadow:
+    0 0 0 1px var(--ed-frame-ring-out),
+    0 0 0 2px var(--ed-note-edge);
+}
+
+.ed-shell .ed-redact.is-picked {
+  box-shadow:
+    0 0 0 1px var(--ed-frame-ring-out),
+    0 0 0 2px var(--ed-accent);
+}
+
+.ed-shell .ed-redact-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--ed-accent);
+  box-shadow: 0 0 0 1.5px var(--ed-frame-ring-out);
+}
+
+.ed-shell .ed-redact-handle.is-nw { left: -6px; top: -6px; cursor: nwse-resize; }
+.ed-shell .ed-redact-handle.is-ne { right: -6px; top: -6px; cursor: nesw-resize; }
+.ed-shell .ed-redact-handle.is-sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+.ed-shell .ed-redact-handle.is-se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+
+/* Its two buttons, kept below the box so they never cover what is being
+   hidden. */
+.ed-shell .ed-redact-tools {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 8px;
+  background: var(--ed-surface);
+  box-shadow: var(--ed-shadow-md);
+  cursor: default;
+}
+
+/* A dial, beside its own name. Short: these sit over the picture and
+   anything wider would cover what is being hidden. */
+.ed-shell .ed-redact-dial {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 4px;
+  font-size: 10.5px;
+  color: var(--ed-text-dim);
+  white-space: nowrap;
+}
+
+.ed-shell .ed-redact-dial input[type="range"] {
+  width: 68px;
+  accent-color: var(--ed-accent);
+}
+
 /* ------------------------------------------------------- AI providers */
 
 /* A page inside the agent's column now, rather than a window over the
@@ -3486,4 +3721,54 @@ body.ed-resizing-cols {
   border-color: #7a3a3a;
   background: #351d1d;
   color: #f3bcbc;
+}
+
+/* ---------------------------------------------------------- the colour dials */
+
+/* Wider than the frame-shape menu it shares a class with: three sliders,
+   each with a name and a reading, need the room. */
+.ed-shell .ed-grade {
+  min-width: 248px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ed-shell .ed-grade-dial {
+  display: grid;
+  /* Name, slider, reading. The name and the reading are given fixed
+     columns so the three sliders line up with each other — ragged ends
+     make three dials read as three unrelated controls. */
+  grid-template-columns: 74px 1fr 38px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--ed-text-dim);
+}
+
+.ed-shell .ed-grade-name {
+  white-space: nowrap;
+}
+
+.ed-shell .ed-grade-dial input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--ed-accent);
+}
+
+.ed-shell .ed-grade-value {
+  text-align: right;
+  /* So the reading does not jitter sideways as the slider moves. */
+  font-variant-numeric: tabular-nums;
+  color: var(--ed-text);
+}
+
+.ed-shell .ed-grade-reset {
+  align-self: flex-end;
+}
+
+.ed-shell .ed-grade-reset:disabled {
+  opacity: 0.45;
+  cursor: default;
 }

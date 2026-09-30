@@ -24,7 +24,8 @@ import {
 import { drawTextLayer, textBounds } from "../textLayer";
 import { MenuBar, type MenuDef } from "./MenuBar";
 import { AiSettings } from "./AiSettings";
-import { describe } from "../describe";
+import { describe, roughTokens } from "../describe";
+import { chaptersFrom } from "../chapters";
 import {
   apply as applyOps,
   asOperation,
@@ -57,6 +58,7 @@ import {
   type ProjectNote,
   CAPTION_WORD_COUNTS,
   type CaptionProgress,
+  type AgentFrame,
   type AgentTurn,
   type AiModel,
   type SpeechEngine,
@@ -76,6 +78,30 @@ import {
   type TransitionKind,
   layerFramingAt,
   isSoundClip,
+  cropOf,
+  croppedShape,
+  heldCrop,
+  MIN_CROP,
+  MAX_SOFTNESS,
+  MIN_GRADE,
+  MIN_REDACTION,
+  MIN_SOFTNESS,
+  MAX_RADIUS,
+  newId,
+  NEUTRAL_GRADE,
+  gradeFilter,
+  gradeOf,
+  isGraded,
+  MAX_GRADE,
+  radiusOf,
+  softnessOf,
+  WHOLE_PICTURE,
+  heldRedaction,
+  redactionsOf,
+  type Crop,
+  type Grade,
+  type Redaction,
+  isCropped,
   isTextClip,
   layoutAt,
   DEFAULT_CLIP_SECONDS,
@@ -141,6 +167,12 @@ interface EditorShellProps {
   /** `atSeconds` is the clip's own time, which is what a zoom point is
    * measured in. */
   onUpdateClipLayout: (clipId: string, layout: ClipLayout, atSeconds: number) => void;
+  /** Which part of a clip's own picture is kept. Undefined keeps all. */
+  onCropClip: (clipId: string, crop: Crop | undefined) => void;
+  /** The rectangles covered over on a clip. */
+  onRedactClip: (clipId: string, boxes: Redaction[]) => void;
+  /** A clip's colour. A grade back at neutral is taken off the clip. */
+  onGradeClip: (clipId: string, grade: Grade) => void;
   onAddLayoutPoint: (clipId: string, atSeconds: number, layout: ClipLayout) => void;
   /** Puts a title on the timeline. A null track means there was no room
    * on any of them, and it needs one of its own. */
@@ -452,6 +484,7 @@ function isTyping(): boolean {
 /* ------------------------------------------------------------------ icons */
 
 type IconName =
+  | "colour"
   | "trash"
   | "pencil"
   | "folder"
@@ -517,6 +550,37 @@ function Icon({ name, className }: { name: IconName; className?: string }) {
   );
 }
 
+/** The three colour dials, in the order they are applied.
+ *
+ * The order is not cosmetic: brightness, then contrast, then saturation
+ * is what the preview's CSS filter does and what the renderer's
+ * filtergraph does, and a panel that listed them in some other order
+ * would suggest they could be thought about separately. Each carries the
+ * recording it is usually reached for, because "contrast" on its own
+ * does not tell anybody when to touch it.
+ */
+const COLOUR_DIALS: {
+  key: "brightness" | "contrast" | "saturation";
+  name: string;
+  why: string;
+}[] = [
+  {
+    key: "brightness",
+    name: "Brightness",
+    why: "For footage shot too dark, or against a window that blew it out",
+  },
+  {
+    key: "contrast",
+    name: "Contrast",
+    why: "For a screen capture that looks flat and grey",
+  },
+  {
+    key: "saturation",
+    name: "Colour",
+    why: "For a washed-out webcam. All the way down is black and white",
+  },
+];
+
 function iconPaths(name: IconName) {
   switch (name) {
     case "trash":
@@ -576,6 +640,15 @@ function iconPaths(name: IconName) {
           <path d="M5 19L16 8" />
           <path d="M14.5 4.5l1 2.5 2.5 1-2.5 1-1 2.5-1-2.5L11 8l2.5-1z" />
           <path d="M19 15l.6 1.4L21 17l-1.4.6L19 19l-.6-1.4L17 17l1.4-.6z" />
+        </>
+      );
+    case "colour":
+      // A circle half filled: the sign every camera and phone puts on its
+      // brightness and contrast controls.
+      return (
+        <>
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none" />
         </>
       );
     case "crop":
@@ -735,6 +808,52 @@ function swatchGradient(category: BackdropCategory, index: number): string {
 /* ---------------------------------------------------------------- helpers */
 
 /** What stands in for a title in the places that expect a media file. */
+/** How a cropped picture is drawn inside its layer.
+ *
+ * The same rule ffmpeg's `crop` follows, written for a browser: the kept
+ * rectangle is what fills the box, so the picture is blown up by the
+ * reciprocal of the crop and slid so the kept corner lands at the box's
+ * corner. Everything outside is taken away by the layer's own clipping.
+ *
+ * Both sides are driven by the same four numbers on the clip, which is
+ * what makes the preview a promise about the file rather than a sketch
+ * of it.
+ */
+function cropStyle(clip: TimelineClip, whole = false): CSSProperties {
+  // `whole` while the crop handles are out. A crop tool that applied
+  // itself as you dragged would move the picture under the rectangle and
+  // leave nothing to aim at: what is being chosen is which part of the
+  // picture to keep, so the picture has to hold still and the rectangle
+  // has to be the thing that moves.
+  const crop = whole ? WHOLE_PICTURE : cropOf(clip);
+  if (!isCropped(crop)) return {};
+  return {
+    position: "absolute",
+    width: `${(1 / crop.width) * 100}%`,
+    height: `${(1 / crop.height) * 100}%`,
+    left: `${(-crop.x / crop.width) * 100}%`,
+    top: `${(-crop.y / crop.height) * 100}%`,
+    maxWidth: "none",
+    maxHeight: "none",
+  };
+}
+
+/** How a clip's own picture is drawn: its crop and its colour together.
+ *
+ * Both are put on the media element itself rather than on the layer
+ * around it, and that placement is what makes the preview agree with the
+ * file. The layer also holds the covering boxes, the selection outline
+ * and the resize handles; a filter on the layer would tint the handles,
+ * and — worse — would tint a solid black fill drawn to hide something,
+ * which in the exported file stays black whatever the footage under it
+ * is graded to. Filtering only the picture puts the grade before the
+ * covering on both sides, which is where the renderer puts it too.
+ */
+function pictureStyle(clip: TimelineClip, whole = false): CSSProperties {
+  const filter = gradeFilter(gradeOf(clip));
+  return { ...cropStyle(clip, whole), ...(filter ? { filter } : {}) };
+}
+
 function titleStandIn(clip: TimelineClip): MediaItem {
   return {
     path: "",
@@ -1008,6 +1127,9 @@ export function EditorShell({
   onMoveClips,
   onRemoveClips,
   onUpdateClipLayout,
+  onCropClip,
+  onRedactClip,
+  onGradeClip,
   onAddLayoutPoint,
   onRemoveLayoutPoint,
   onAddTextClip,
@@ -1106,11 +1228,27 @@ export function EditorShell({
    * it takes — a thinking model reading a long transcript is not quick —
    * so the panel says so rather than sitting still. */
   const [agentBusy, setAgentBusy] = useState(false);
+  /** How many frames are being fetched, when the model has asked to look.
+   * Said out loud: a second round with no sign of it reads as the app
+   * having stopped. */
+  const [agentLooking, setAgentLooking] = useState(0);
   const [agentError, setAgentError] = useState<string | null>(null);
   /** Turns whose proposal has been applied or thrown away, by their place
    * in the thread. A proposal is only ever offered once: the film it was
    * written against has moved on by the time it has been used. */
   const [agentSettled, setAgentSettled] = useState<Map<number, string>>(new Map());
+  /** Whether the crop handles are out, and on which clip.
+   *
+   * One clip at a time: a crop belongs to a particular piece of footage,
+   * and handles over two of them at once would be four corners with no
+   * way to tell whose they were. */
+  const [cropping, setCropping] = useState<string | null>(null);
+
+  /** Whether the covering tool is out, and on which clip. */
+  const [redacting, setRedacting] = useState<string | null>(null);
+  /** Which box is picked out, so it can be removed or restyled. */
+  const [pickedBox, setPickedBox] = useState<string | null>(null);
+
   /** Whether the AI provider settings are open. App settings rather
    * than project settings, so they live in a box of their own. */
   const [aiOpen, setAiOpen] = useState(false);
@@ -1150,6 +1288,8 @@ export function EditorShell({
   const [captionLanguage, setCaptionLanguage] = useState("");
   const [captionWords, setCaptionWords] = useState(4);
   const [shapeMenuOpen, setShapeMenuOpen] = useState(false);
+  /** Which clip's colour dials are out, or null. */
+  const [colouring, setColouring] = useState<string | null>(null);
   /** The box being dragged across the timeline to pick clips out, in the
    * coordinates of the window. Null when nothing is being dragged. */
   const [marquee, setMarquee] = useState<{
@@ -1364,8 +1504,11 @@ export function EditorShell({
    * every render. */
   const transportRef = useRef({
     play: () => {},
+    stop: () => {},
+    playing: (): boolean => false,
     step: (_frames: number) => {},
     goTo: (_seconds: number) => {},
+    note: () => {},
     end: 0,
   });
   /** Which layer is under the pointer right now, so the stage can show it
@@ -1488,6 +1631,44 @@ export function EditorShell({
         case "End":
           e.preventDefault();
           transport.goTo(transport.end);
+          return;
+        default:
+      }
+
+      // The keys from the days of the shuttle knob, and the two that go
+      // with them. Separate from the switch above only because these are
+      // letters and want their case ignored.
+      switch (e.key.toLowerCase()) {
+        // J back, K stop, L forward. The hands of anyone who has used
+        // another editor already know them, and nothing else in this one
+        // moves the playhead without the mouse leaving the timeline.
+        case "j":
+          e.preventDefault();
+          transport.step(-10);
+          return;
+        case "k":
+          e.preventDefault();
+          transport.stop();
+          return;
+        case "l":
+          e.preventDefault();
+          // Playing already: cover ground instead. Pressing L twice in
+          // every other editor means "faster", and this is the nearest
+          // thing to it that does not need a second clock.
+          if (transport.playing()) transport.step(10);
+          else transport.play();
+          return;
+        // The cut, under the finger it sits under everywhere else. Ctrl+K
+        // does the same and stays advertised in the menu.
+        case "s":
+          e.preventDefault();
+          cutAtPlayheadRef.current();
+          return;
+        // A remark about what is on screen, left without stopping to
+        // right-click the ruler for it.
+        case "m":
+          e.preventDefault();
+          transport.note();
           return;
         default:
       }
@@ -1976,6 +2157,23 @@ export function EditorShell({
     return () => window.removeEventListener("mousedown", close);
   }, [shapeMenuOpen]);
 
+  // The colour dials go away the same way — and also when the selection
+  // changes under them, because they belong to one clip and a panel still
+  // showing the last clip's numbers would be worse than no panel.
+  useEffect(() => {
+    if (!colouring) return;
+    if (!selectedClipIds.includes(colouring)) {
+      setColouring(null);
+      return;
+    }
+    const close = (event: MouseEvent) => {
+      const menu = (event.target as Element | null)?.closest?.(".ed-chipmenu");
+      if (!menu) setColouring(null);
+    };
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [colouring, selectedClipIds]);
+
   // How much room the preview has been left. The frame is worked out from
   // this rather than left to the layout, because the export needs the same
   // arithmetic and CSS cannot be asked for its answer.
@@ -2346,6 +2544,18 @@ export function EditorShell({
     step: stepFrames,
     goTo: (seconds: number) => seekTo(seconds),
     end: totalSeconds,
+    // Stopping is not the same as toggling: K means stop, and pressing it
+    // twice should leave the playhead still rather than start it again.
+    stop: () => {
+      if (isPlaying) togglePlay();
+    },
+    playing: () => isPlaying,
+    // A note at the playhead, opened for typing where it lands.
+    note: () => {
+      const made = onAddNote(currentTime);
+      setOpenNote({ id: made.id, x: 0, y: 0 });
+      setToast("Note left at the playhead.");
+    },
   };
 
   /** Where along the timeline a pointer is, in seconds. */
@@ -2669,6 +2879,67 @@ export function EditorShell({
     return { ops, lines, problem: null };
   }
 
+  /** The briefing as it stands, and what it would cost to send.
+   *
+   * Worked out before anyone presses Send rather than after. Whoever is
+   * using this brought their own key, so the bill is theirs: the size of
+   * what is about to be sent is not a detail to discover on an invoice.
+   *
+   * Only while the panel is open — describing an hour-long project is
+   * not free, and nobody is asking for it with the column shut. */
+  const briefing = useMemo(() => {
+    if (!agentOpen || aiOpen) return null;
+    const text = describe(
+      { tracks, media, notes, words },
+      { silences: quietRanges(tracks, audioPeaks) },
+    );
+    return { text, tokens: roughTokens(text) };
+  }, [agentOpen, aiOpen, tracks, media, notes, words, audioPeaks]);
+
+  /** Above this, sending is worth a second press.
+   *
+   * Not a hard limit: it is the user's key, their project and their
+   * decision. It is here so that a long project cannot be sent by
+   * accident, which is the only part of it this editor has any business
+   * having an opinion about. */
+  const LARGE_BRIEFING = 12_000;
+  const [agentConfirming, setAgentConfirming] = useState(false);
+
+  /** Turns a moment on the timeline into a frame out of a file.
+   *
+   * The model asks about the timeline, because that is the clock the
+   * briefing is written in. A file knows nothing about the timeline: the
+   * clip playing at that moment says which file, and how far into it —
+   * carrying the trim and the speed, so a moment inside a clip playing at
+   * double speed is twice as far into its file as it is into the edit.
+   *
+   * Nothing is looked at where nothing is playing, and a title has no
+   * file to look into.
+   */
+  async function frameForMoment(at: number): Promise<AgentFrame | null> {
+    for (const track of tracks) {
+      for (const clip of track.clips) {
+        const ends = clip.startSeconds + clip.durationSeconds;
+        if (at < clip.startSeconds || at >= ends) continue;
+        if (isTextClip(clip) || clip.mediaPath === "") continue;
+        const item = media.find((m) => m.path === clip.mediaPath);
+        if (!item || item.kind === "audio") continue;
+        try {
+          const path = await api.frameAt(
+            clip.mediaPath,
+            mediaTimeAt(clip, at - clip.startSeconds),
+          );
+          return { path, atSeconds: at };
+        } catch {
+          // One frame that could not be taken is not a reason to abandon
+          // the question; the model is simply shown the rest.
+          return null;
+        }
+      }
+    }
+    return null;
+  }
+
   /** Asks the brain about the project.
    *
    * The briefing is written fresh every time: the film moves under the
@@ -2680,6 +2951,7 @@ export function EditorShell({
 
     setAgentError(null);
     setAgentBusy(true);
+    setAgentConfirming(false);
     // Only what was typed is cleared; a question asked by a button was
     // never in the box.
     if (asking == null) setAgentTyped("");
@@ -2687,18 +2959,55 @@ export function EditorShell({
     setAgentThread((thread) => [...thread, asked]);
 
     try {
-      const doc = { tracks, media, notes, words };
-      const reply = await api.askAgent({
-        briefing: describe(doc, { silences: quietRanges(tracks, audioPeaks) }),
+      // The briefing already worked out for the estimate, so what is sent
+      // is exactly what was costed.
+      const written =
+        briefing?.text ??
+        describe(
+          { tracks, media, notes, words },
+          { silences: quietRanges(tracks, audioPeaks) },
+        );
+      // What was said before, without the proposals: the model wrote
+      // those itself and repeating them back costs tokens to tell it
+      // what it already knows.
+      const history = agentThread.map((turn) => ({
+        role: turn.role,
+        content: turn.content,
+      }));
+      const eyes = aiModels.some((m) => m.chosenFor.includes("eyes"));
+
+      let reply = await api.askAgent({
+        briefing: written,
         question,
-        // What was said before, without the proposals: the model wrote
-        // those itself and repeating them back costs tokens to tell it
-        // what it already knows.
-        history: agentThread.map((turn) => ({
-          role: turn.role,
-          content: turn.content,
-        })),
+        history,
+        canLook: eyes,
+        frames: [],
       });
+
+      // It may answer by asking to see. Then the frames are fetched and
+      // the same question put again — one more round, and only one: the
+      // tool is not offered the second time, so it has to answer with
+      // what it has been shown.
+      if (reply.looks.length > 0) {
+        setAgentLooking(reply.looks.length);
+        try {
+          const frames: AgentFrame[] = [];
+          for (const at of reply.looks) {
+            const frame = await frameForMoment(at);
+            if (frame) frames.push(frame);
+          }
+          reply = await api.askAgent({
+            briefing: written,
+            question,
+            history,
+            canLook: eyes,
+            frames,
+          });
+        } finally {
+          setAgentLooking(0);
+        }
+      }
+
       setAgentThread((thread) => [
         ...thread,
         {
@@ -2741,6 +3050,173 @@ export function EditorShell({
       if (latest !== was) patchSettings({ agentWidth: latest });
     };
     document.body.classList.add("ed-resizing-cols");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  /** Drags one edge or corner of a crop.
+   *
+   * Worked against the layer's own box on screen, so the numbers stay
+   * fractions of the source whatever size the preview happens to be —
+   * the same fractions the filtergraph is given. `edge` is read a letter
+   * at a time, which is what lets one piece of arithmetic serve four
+   * corners and four sides.
+   */
+  function startCropDrag(
+    event: ReactPointerEvent<HTMLElement>,
+    clip: TimelineClip,
+    edge: string,
+  ) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    // Measured against the whole picture, which is what is on screen
+    // while the handles are out — so a tenth of the way across the
+    // picture is a tenth of the crop's numbers, with no conversion.
+    const box = (event.currentTarget.closest(".ed-crop-area") as HTMLElement | null)
+      ?.getBoundingClientRect();
+    if (!box || box.width <= 0 || box.height <= 0) return;
+
+    const was = cropOf(clip);
+    const from = { x: event.clientX, y: event.clientY };
+
+    const onMove = (e: PointerEvent) => {
+      const dx = (e.clientX - from.x) / box.width;
+      const dy = (e.clientY - from.y) / box.height;
+
+      let { x, y, width, height } = was;
+      if (edge.includes("w")) {
+        x = was.x + dx;
+        width = was.width - dx;
+      }
+      if (edge.includes("e")) width = was.width + dx;
+      if (edge.includes("n")) {
+        y = was.y + dy;
+        height = was.height - dy;
+      }
+      if (edge.includes("s")) height = was.height + dy;
+
+      // An edge dragged past its opposite would turn the rectangle
+      // inside out; it stops against it instead.
+      if (edge.includes("w") && width < MIN_CROP) {
+        x = was.x + was.width - MIN_CROP;
+        width = MIN_CROP;
+      }
+      if (edge.includes("n") && height < MIN_CROP) {
+        y = was.y + was.height - MIN_CROP;
+        height = MIN_CROP;
+      }
+      onCropClip(clip.id, heldCrop({ x, y, width, height }));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  /** Draws a new covering box, or moves and resizes one already there.
+   *
+   * All three are the same gesture measured the same way — against the
+   * picture's own box, in fractions of it — so a box drawn at one preview
+   * size means the same thing at another, and in the file.
+   *
+   * `edge` is null to move the whole box, "new" to draw one from nothing,
+   * and otherwise the corner being dragged.
+   */
+  function startRedactDrag(
+    event: ReactPointerEvent<HTMLElement>,
+    clip: TimelineClip,
+    boxId: string | null,
+    edge: string | null,
+  ) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const area = (event.currentTarget.closest(".ed-redact-area") as HTMLElement | null)
+      ?.getBoundingClientRect();
+    if (!area || area.width <= 0 || area.height <= 0) return;
+
+    const boxes = redactionsOf(clip);
+    const at = (e: { clientX: number; clientY: number }) => ({
+      x: (e.clientX - area.left) / area.width,
+      y: (e.clientY - area.top) / area.height,
+    });
+    const from = at(event);
+
+    // A box being drawn is born where the press landed and grows from
+    // there; one being changed starts as it is.
+    const made: Redaction =
+      boxId == null
+        ? {
+            id: newId("redact"),
+            x: from.x,
+            y: from.y,
+            width: MIN_REDACTION,
+            height: MIN_REDACTION,
+            style: "blur",
+          }
+        : (boxes.find((b) => b.id === boxId) as Redaction);
+    if (!made) return;
+    const was = { ...made };
+
+    if (boxId == null) setPickedBox(made.id);
+
+    const onMove = (e: PointerEvent) => {
+      const now = at(e);
+      let next: Redaction;
+
+      if (boxId == null || edge === "new") {
+        // Drawn corner to corner, whichever way the pointer went.
+        next = {
+          ...was,
+          x: Math.min(from.x, now.x),
+          y: Math.min(from.y, now.y),
+          width: Math.abs(now.x - from.x),
+          height: Math.abs(now.y - from.y),
+        };
+      } else if (edge == null) {
+        next = { ...was, x: was.x + (now.x - from.x), y: was.y + (now.y - from.y) };
+      } else {
+        const dx = now.x - from.x;
+        const dy = now.y - from.y;
+        let { x, y, width, height } = was;
+        if (edge.includes("w")) {
+          x = was.x + dx;
+          width = was.width - dx;
+        }
+        if (edge.includes("e")) width = was.width + dx;
+        if (edge.includes("n")) {
+          y = was.y + dy;
+          height = was.height - dy;
+        }
+        if (edge.includes("s")) height = was.height + dy;
+        if (edge.includes("w") && width < MIN_REDACTION) {
+          x = was.x + was.width - MIN_REDACTION;
+          width = MIN_REDACTION;
+        }
+        if (edge.includes("n") && height < MIN_REDACTION) {
+          y = was.y + was.height - MIN_REDACTION;
+          height = MIN_REDACTION;
+        }
+        next = { ...was, x, y, width, height };
+      }
+
+      const held = heldRedaction(next);
+      onRedactClip(
+        clip.id,
+        boxId == null
+          ? [...boxes.filter((b) => b.id !== held.id), held]
+          : boxes.map((b) => (b.id === held.id ? held : b)),
+      );
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   }
@@ -3046,6 +3522,9 @@ export function EditorShell({
     }
     return found;
   }, [tracks]);
+
+  /** The clip the colour dials are set from and written back to. */
+  const colourClip = colouring ? (clipsById.get(colouring)?.clip ?? null) : null;
 
   /** The clips the transitions and speed tabs work on, and the first of
    * them, which is what the controls read their settings from. */
@@ -3381,9 +3860,17 @@ export function EditorShell({
    * so it takes the frame's shape. */
   function shapeOfLayer(layer: Layer): number {
     if (isTextClip(layer.clip)) return shapeRatio(aspect);
-    return layer.item.width && layer.item.height
-      ? layer.item.width / layer.item.height
-      : 16 / 9;
+    // After the crop, not before it. Everything that measures a layer —
+    // the ring around it, the corners of that ring, the area the crop
+    // rectangle is dragged around — is worked out from this, and a clip
+    // cropped to half its width is half as wide on the stage as its file
+    // is. The exception is the clip being cropped, which is shown whole
+    // so there is something to aim the rectangle at.
+    const shape =
+      cropping === layer.clip.id
+        ? { width: layer.item.width ?? 16, height: layer.item.height ?? 9 }
+        : croppedShape(layer.clip, layer.item.width, layer.item.height);
+    return shape ? shape.width / shape.height : 16 / 9;
   }
 
   /** The shape of the stage — the picture inside the padding. */
@@ -3562,10 +4049,13 @@ export function EditorShell({
         width: wide * 100 + "%",
         left: (0.5 + layer.layout.x) * 100 + "%",
         top: (0.5 + layer.layout.y) * 100 + "%",
-        aspectRatio:
-          layer.item.width && layer.item.height
-            ? layer.item.width + " / " + layer.item.height
-            : "16 / 9",
+        aspectRatio: (() => {
+          const shape =
+            cropping === layer.clip.id
+              ? { width: layer.item.width ?? 16, height: layer.item.height ?? 9 }
+              : croppedShape(layer.clip, layer.item.width, layer.item.height);
+          return shape ? shape.width + " / " + shape.height : "16 / 9";
+        })(),
       },
       handles: {
         nw: place(west, north),
@@ -3948,6 +4438,29 @@ export function EditorShell({
         },
         { label: "Import Audio...", onClick: () => onImportMedia("audio") },
         { label: "Export...", onClick: onExport, separatorBefore: true },
+        {
+          // The notes along the ruler are already a moment and a few
+          // words apiece, which is what a chapter is.
+          label: "Copy Chapters",
+          onClick: () => {
+            const made = chaptersFrom(notes, timelineSeconds);
+            if (made.count === 0) {
+              setToast(made.problems[0] ?? "There are no notes to make chapters from.");
+              return;
+            }
+            void navigator.clipboard
+              .writeText(made.text)
+              .then(() =>
+                setToast(
+                  made.problems.length > 0
+                    ? `${made.count} chapters copied — but ${made.problems[0].toLowerCase()}`
+                    : `${made.count} chapters copied. Paste them into the description.`,
+                ),
+              )
+              .catch(() => setToast("The clipboard would not take them."));
+          },
+          disabled: notes.length === 0,
+        },
         { label: "Close Project", onClick: onCloseProject, separatorBefore: true },
       ],
     },
@@ -3991,7 +4504,8 @@ export function EditorShell({
         {
           label: "Cut at Playhead",
           onClick: () => cutAtPlayhead(),
-          shortcut: "Ctrl+K",
+          // Both work; the menu advertises the one nobody has to be told.
+          shortcut: "S",
           separatorBefore: true,
         },
         {
@@ -4139,6 +4653,150 @@ export function EditorShell({
           {/* stage toolbar */}
           <div className="ed-stage-toolbar">
             <div className="ed-stage-toolbar-left">
+              {/* Back, and doing something this time. Cropping is how a
+                  taskbar, a browser's address bar or the edge of a second
+                  monitor comes off a screen recording, which is most
+                  recordings. */}
+              <button
+                className={`ed-chipbtn ${cropping ? "is-active" : ""}`}
+                aria-pressed={cropping != null}
+                title={
+                  selectedClipIds.length === 1
+                    ? "Choose which part of this clip's picture to keep"
+                    : "Select one clip to crop it"
+                }
+                onClick={() => {
+                  if (cropping) {
+                    setCropping(null);
+                    return;
+                  }
+                  const only = selectedClipIds.length === 1 ? selectedClipIds[0] : null;
+                  if (!only) {
+                    setToast("Select one clip on the timeline to crop it.");
+                    return;
+                  }
+                  if (isTextClip(clipsById.get(only)?.clip ?? ({} as TimelineClip))) {
+                    setToast("A title has no picture of its own to crop.");
+                    return;
+                  }
+                  setCropping(only);
+                }}
+              >
+                <Icon name="crop" />
+                <span>Crop</span>
+              </button>
+              {/* Covering something over is a safety feature: a token or
+                  an address published by accident cannot be taken back. */}
+              <button
+                className={`ed-chipbtn ${redacting ? "is-active" : ""}`}
+                aria-pressed={redacting != null}
+                title={
+                  selectedClipIds.length === 1
+                    ? "Blur out something on this clip so it never reaches the file"
+                    : "Select one clip to blur something on it"
+                }
+                onClick={() => {
+                  if (redacting) {
+                    setRedacting(null);
+                    setPickedBox(null);
+                    return;
+                  }
+                  const only = selectedClipIds.length === 1 ? selectedClipIds[0] : null;
+                  if (!only) {
+                    setToast("Select one clip on the timeline first.");
+                    return;
+                  }
+                  setCropping(null);
+                  setRedacting(only);
+                }}
+              >
+                <Icon name="frame" />
+                <span>Blur Area</span>
+              </button>
+              {/* Colour. Three dials rather than curves and wheels: this
+                  is a recorder, and what recordings actually need is a
+                  window that blew the exposure pulled back, a flat screen
+                  capture given some contrast, and a washed-out webcam
+                  given some colour. */}
+              <div className="ed-chipmenu">
+                <button
+                  className={`ed-chipbtn ${
+                    colouring || (colourClip && isGraded(gradeOf(colourClip)))
+                      ? "is-active"
+                      : ""
+                  }`}
+                  aria-haspopup="menu"
+                  aria-expanded={colouring != null}
+                  title={
+                    selectedClipIds.length === 1
+                      ? "Brightness, contrast and colour for this clip"
+                      : "Select one clip to change its colour"
+                  }
+                  onClick={() => {
+                    if (colouring) {
+                      setColouring(null);
+                      return;
+                    }
+                    const only = selectedClipIds.length === 1 ? selectedClipIds[0] : null;
+                    if (!only) {
+                      setToast("Select one clip on the timeline first.");
+                      return;
+                    }
+                    if (isTextClip(clipsById.get(only)?.clip ?? ({} as TimelineClip))) {
+                      setToast("A title has no picture of its own to colour.");
+                      return;
+                    }
+                    setColouring(only);
+                  }}
+                >
+                  <Icon name="colour" />
+                  <span>Colour</span>
+                  <Icon name="chevron" className="ed-caret" />
+                </button>
+                {colouring && colourClip && (
+                  <div className="ed-chipmenu-list ed-grade" role="menu">
+                    {COLOUR_DIALS.map((dial) => {
+                      const grade = gradeOf(colourClip);
+                      const value = grade[dial.key];
+                      return (
+                        <label key={dial.key} className="ed-grade-dial">
+                          <span className="ed-grade-name">{dial.name}</span>
+                          <input
+                            type="range"
+                            min={MIN_GRADE * 100}
+                            max={MAX_GRADE * 100}
+                            step={1}
+                            value={Math.round(value * 100)}
+                            title={dial.why}
+                            onChange={(e) =>
+                              onGradeClip(colouring, {
+                                ...grade,
+                                [dial.key]: Number(e.currentTarget.value) / 100,
+                              })
+                            }
+                            // A double-click on a dial puts that one dial
+                            // back, which is quicker than aiming a slider
+                            // at exactly the middle.
+                            onDoubleClick={() =>
+                              onGradeClip(colouring, { ...grade, [dial.key]: 1 })
+                            }
+                          />
+                          <span className="ed-grade-value">
+                            {Math.round(value * 100)}%
+                          </span>
+                        </label>
+                      );
+                    })}
+                    <button
+                      className="ed-pill ed-grade-reset"
+                      disabled={!isGraded(gradeOf(colourClip))}
+                      onClick={() => onGradeClip(colouring, NEUTRAL_GRADE)}
+                    >
+                      Back to normal
+                    </button>
+                  </div>
+                )}
+              </div>
               <div className="ed-chipmenu">
                 <button
                   className="ed-chipbtn"
@@ -4331,11 +4989,26 @@ export function EditorShell({
                           // the stage's — which is what lets a transition
                           // move and scale it like any other layer while the
                           // words stay where they were placed inside it.
-                          aspectRatio: isTextClip(layer.clip)
-                            ? aspect.replace(":", " / ")
-                            : layer.item.width && layer.item.height
-                              ? `${layer.item.width} / ${layer.item.height}`
-                              : "16 / 9",
+                          // A 16:9 recording cropped to its middle third
+                          // is not 16:9 any more, and a box that kept the
+                          // old shape would squash the picture inside it.
+                          aspectRatio: (() => {
+                            if (isTextClip(layer.clip)) return aspect.replace(":", " / ");
+                            // Whole while its handles are out, so there is
+                            // a picture to aim the rectangle at.
+                            const shape =
+                              cropping === layer.clip.id
+                                ? {
+                                    width: layer.item.width ?? 16,
+                                    height: layer.item.height ?? 9,
+                                  }
+                                : croppedShape(
+                                    layer.clip,
+                                    layer.item.width,
+                                    layer.item.height,
+                                  );
+                            return shape ? `${shape.width} / ${shape.height}` : "16 / 9";
+                          })(),
                         }}
                         onPointerDown={(e) => startLayerGesture(e, layer, "move")}
                         onContextMenu={(e) => {
@@ -4355,6 +5028,39 @@ export function EditorShell({
                           });
                         }}
                       >
+                        {/* What is covered over, drawn in the preview
+                            the way the renderer covers it in the file.
+                            Inside the layer's own box, so it is clipped
+                            by the crop exactly as the filter is.
+
+                            The region and the style match on both sides.
+                            The softness of a blur does not, quite: a CSS
+                            blur and ffmpeg's boxblur are different kernels
+                            and no radius makes them identical. A fill is
+                            the same black on both. */}
+                        {redactionsOf(layer.clip).map((box) => (
+                          <span
+                            key={box.id}
+                            className={`ed-covered is-${box.style}`}
+                            aria-hidden="true"
+                            style={{
+                              left: box.x * 100 + "%",
+                              top: box.y * 100 + "%",
+                              width: box.width * 100 + "%",
+                              height: box.height * 100 + "%",
+                              // Both dials read from the same numbers the
+                              // filtergraph is given, measured against the
+                              // box's shorter side the same way.
+                              borderRadius: radiusOf(box) * 100 + "%",
+                              ...(box.style === "blur"
+                                ? {
+                                    backdropFilter: `blur(${softnessOf(box) * 100}px)`,
+                                    WebkitBackdropFilter: `blur(${softnessOf(box) * 100}px)`,
+                                  }
+                                : {}),
+                            }}
+                          />
+                        ))}
                         {layer.clip.text ? (
                           <>
                             {/* Where the words are, and so where a press
@@ -4391,10 +5097,12 @@ export function EditorShell({
                             src={convertFileSrc(layer.item.path)}
                             alt={layer.item.name}
                             draggable={false}
+                            style={pictureStyle(layer.clip, cropping === layer.clip.id)}
                           />
                         ) : (
                           <video
                             className="ed-video"
+                            style={pictureStyle(layer.clip, cropping === layer.clip.id)}
                             src={convertFileSrc(layer.item.path)}
                             // Marked cross-origin so the gain stage can
                             // take it: the asset protocol answers with a
@@ -4445,6 +5153,191 @@ export function EditorShell({
                       return null;
                     }
                     const marks = marksFor(layer);
+
+                    // While cropping, the layer's own box is the thing
+                    // being worked on: the ring and its corners would say
+                    // "this is selected" over handles that mean something
+                    // else entirely, so they stand down.
+                    if (redacting === layer.clip.id) {
+                      const boxes = redactionsOf(layer.clip);
+                      return (
+                        <div
+                          key={`redact:${layer.clip.id}`}
+                          className="ed-redact-area"
+                          style={marks.box}
+                          onPointerDown={(e) => {
+                            // A press on the picture itself draws a new
+                            // box; one on a box is handled by the box.
+                            if (e.target !== e.currentTarget) return;
+                            setPickedBox(null);
+                            startRedactDrag(e, layer.clip, null, "new");
+                          }}
+                        >
+                          {boxes.map((box) => (
+                            <div
+                              key={box.id}
+                              className={`ed-redact ${
+                                pickedBox === box.id ? "is-picked" : ""
+                              } is-${box.style}`}
+                              style={{
+                                left: box.x * 100 + "%",
+                                top: box.y * 100 + "%",
+                                width: box.width * 100 + "%",
+                                height: box.height * 100 + "%",
+                                borderRadius: radiusOf(box) * 100 + "%",
+                              }}
+                              onPointerDown={(e) => {
+                                setPickedBox(box.id);
+                                startRedactDrag(e, layer.clip, box.id, null);
+                              }}
+                            >
+                              {(["nw", "ne", "sw", "se"] as const).map((corner) => (
+                                <span
+                                  key={corner}
+                                  className={`ed-redact-handle is-${corner}`}
+                                  onPointerDown={(e) =>
+                                    startRedactDrag(e, layer.clip, box.id, corner)
+                                  }
+                                />
+                              ))}
+                              {pickedBox === box.id && (
+                                <div className="ed-redact-tools">
+                                  <button
+                                    className="ed-pill"
+                                    title={
+                                      box.style === "blur"
+                                        ? "A blur smears what was there; a fill leaves nothing"
+                                        : "A fill leaves nothing behind"
+                                    }
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    onClick={() =>
+                                      onRedactClip(
+                                        layer.clip.id,
+                                        boxes.map((b) =>
+                                          b.id === box.id
+                                            ? {
+                                                ...b,
+                                                style:
+                                                  b.style === "blur" ? "solid" : "blur",
+                                              }
+                                            : b,
+                                        ),
+                                      )
+                                    }
+                                  >
+                                    {box.style === "blur" ? "Blur" : "Fill"}
+                                  </button>
+                                  <button
+                                    className="ed-pill"
+                                    title="Take this box away"
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    onClick={() => {
+                                      onRedactClip(
+                                        layer.clip.id,
+                                        boxes.filter((b) => b.id !== box.id),
+                                      );
+                                      setPickedBox(null);
+                                    }}
+                                  >
+                                    Remove
+                                  </button>
+                                  {box.style === "blur" && (
+                                    <label
+                                      className="ed-redact-dial"
+                                      title="How soft the blur is"
+                                      onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                      <span>Blur</span>
+                                      <input
+                                        type="range"
+                                        min={MIN_SOFTNESS * 100}
+                                        max={MAX_SOFTNESS * 100}
+                                        step={1}
+                                        value={softnessOf(box) * 100}
+                                        onChange={(e) => {
+                                          const said = Number(e.currentTarget.value) / 100;
+                                          onRedactClip(
+                                            layer.clip.id,
+                                            boxes.map((b) =>
+                                              b.id === box.id ? { ...b, softness: said } : b,
+                                            ),
+                                          );
+                                        }}
+                                      />
+                                    </label>
+                                  )}
+                                  <label
+                                    className="ed-redact-dial"
+                                    title="How round its corners are"
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                  >
+                                    <span>Round</span>
+                                    <input
+                                      type="range"
+                                      min={0}
+                                      max={MAX_RADIUS * 100}
+                                      step={1}
+                                      value={radiusOf(box) * 100}
+                                      onChange={(e) => {
+                                        const said = Number(e.currentTarget.value) / 100;
+                                        onRedactClip(
+                                          layer.clip.id,
+                                          boxes.map((b) =>
+                                            b.id === box.id ? { ...b, radius: said } : b,
+                                          ),
+                                        );
+                                      }}
+                                    />
+                                  </label>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                          {boxes.length === 0 && (
+                            <span className="ed-redact-hint">
+                              Drag over anything that should not be in the film
+                            </span>
+                          )}
+                        </div>
+                      );
+                    }
+
+                    if (cropping === layer.clip.id) {
+                      const crop = cropOf(layer.clip);
+                      return (
+                        <div
+                          key={`crop:${layer.clip.id}`}
+                          className="ed-crop-area"
+                          style={marks.box}
+                        >
+                          {/* The rectangle, placed inside the whole
+                              picture. What is outside it is dimmed rather
+                              than hidden: choosing what to keep means
+                              seeing what is being given up. */}
+                          <div
+                            className="ed-crop"
+                            style={{
+                              left: crop.x * 100 + "%",
+                              top: crop.y * 100 + "%",
+                              width: crop.width * 100 + "%",
+                              height: crop.height * 100 + "%",
+                            }}
+                          >
+                            <div className="ed-crop-thirds" aria-hidden="true" />
+                            {(
+                              ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const
+                            ).map((edge) => (
+                              <span
+                                key={edge}
+                                className={`ed-crop-handle is-${edge}`}
+                                title="Drag to take the edge in"
+                                onPointerDown={(e) => startCropDrag(e, layer.clip, edge)}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    }
                     return (
                       <div
                         key={`marks:${layer.clip.id}`}
@@ -5814,7 +6707,13 @@ export function EditorShell({
                 <div className="ed-turn">
                   <p className="ed-turn-said ed-turn-thinking">
                     <span className="spinner" />
-                    <span>Reading the project…</span>
+                    <span>
+                      {agentLooking > 0
+                        ? `Looking at ${agentLooking} moment${
+                            agentLooking === 1 ? "" : "s"
+                          }…`
+                        : "Reading the project…"}
+                    </span>
                   </p>
                 </div>
               )}
@@ -5844,10 +6743,43 @@ export function EditorShell({
                   // box like this does.
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
+                    // The same stop the button has: a long project is not
+                    // sent by a keystroke either.
+                    if (!agentConfirming && (briefing?.tokens ?? 0) > LARGE_BRIEFING) {
+                      setAgentConfirming(true);
+                      return;
+                    }
                     void askAgent();
                   }
                 }}
               />
+              {/* What leaves this machine, said before it leaves.
+                  Whoever installed this editor is entitled to know that
+                  asking a question sends what they said in their video to
+                  somebody else's server, and roughly how much of it. */}
+              {brain && (
+                <p className="ed-agent-warns">
+                  Sending gives {brain.providerName} the timeline and the
+                  transcript — what was said in this project.
+                  {agentCan.eyes
+                    ? " With eyes chosen, it can also ask to see single frames, and those are sent too."
+                    : " The picture itself stays on this machine."}
+                  {briefing != null && ` About ${
+                    briefing.tokens >= 1000
+                      ? `${(briefing.tokens / 1000).toFixed(1)}k`
+                      : briefing.tokens
+                  } tokens each time you ask.`}
+                </p>
+              )}
+
+              {agentConfirming && briefing != null && (
+                <p className="ed-agent-warns is-loud" role="alert">
+                  This is a long project. Sending it costs about{" "}
+                  {(briefing.tokens / 1000).toFixed(1)}k tokens against your own
+                  key, every time you ask. Press again to send it.
+                </p>
+              )}
+
               <div className="ed-agent-send">
                 <span className="ed-muted">
                   {brain ? `${brain.providerName} · ${brain.model}` : "No brain chosen"}
@@ -5856,9 +6788,27 @@ export function EditorShell({
                   <button
                     className="ed-pill ed-pill-primary"
                     disabled={agentBusy || agentTyped.trim().length === 0}
-                    onClick={() => void askAgent()}
+                    onClick={() => {
+                      // A long briefing takes two presses. Not a refusal
+                      // — it is their key and their project — only a
+                      // stop against sending one by accident.
+                      if (
+                        !agentConfirming &&
+                        (briefing?.tokens ?? 0) > LARGE_BRIEFING
+                      ) {
+                        setAgentConfirming(true);
+                        return;
+                      }
+                      void askAgent();
+                    }}
                   >
-                    <span>{agentBusy ? "Thinking…" : "Send"}</span>
+                    <span>
+                      {agentBusy
+                        ? "Thinking…"
+                        : agentConfirming
+                          ? "Send anyway"
+                          : "Send"}
+                    </span>
                   </button>
                 ) : (
                   <button

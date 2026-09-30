@@ -43,6 +43,7 @@ import {
   newTrack,
   setClipSpeed,
   settleOnTrack,
+  speedShift,
   splitClipAt,
   toMillis,
   trimClip,
@@ -332,9 +333,31 @@ function run(doc: EditDoc, op: Operation): EditDoc {
         .filter((clip) => op.clipIds.includes(clip.id))
         .sort((a, b) => a.startSeconds - b.startSeconds)
         .map((clip) => clip.id);
+
       let tracks = doc.tracks;
-      for (const id of order) tracks = setClipSpeed(tracks, id, op.speed);
-      return { ...doc, tracks };
+      let notes = doc.notes;
+      let words = doc.words;
+      for (const id of order) {
+        // Asked before the change, since afterwards the clip is a
+        // different length and the moments it used to cover are gone.
+        const shift = speedShift(tracks, id, op.speed);
+        tracks = setClipSpeed(tracks, id, op.speed);
+        if (!shift) continue;
+
+        // Everything pinned to a moment moves the way that moment moved.
+        // A note about what someone said at 0:40 is about that moment,
+        // not about the number forty.
+        notes = notes.map((note) => ({
+          ...note,
+          atSeconds: toMillis(shift.at(note.atSeconds)),
+        }));
+        words = words.map((word) => ({
+          ...word,
+          start: toMillis(shift.at(word.start)),
+          end: toMillis(shift.at(word.end)),
+        }));
+      }
+      return { ...doc, tracks, notes, words };
     }
 
     case "setVolume":

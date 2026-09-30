@@ -57,6 +57,17 @@ pub struct Turn {
     pub content: String,
 }
 
+/// One frame the model asked to see, already pulled out of a file.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Frame {
+    /// The image on disk, from `media::frame_at`.
+    pub path: String,
+    /// Where it sits on the timeline, so the model can tie what it sees
+    /// to what the briefing says is there.
+    pub at_seconds: f64,
+}
+
 /// What the editor asks.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -68,6 +79,17 @@ pub struct AgentAsk {
     /// What has been said so far, oldest first. Empty for a fresh start.
     #[serde(default)]
     pub history: Vec<Turn>,
+    /// Whether the model may ask to see frames.
+    ///
+    /// False when no model has been marked as the eyes, and then the tool
+    /// is not offered at all — so the answer is "I cannot see the
+    /// picture" rather than a guess dressed as an observation.
+    #[serde(default)]
+    pub can_look: bool,
+    /// Frames it asked for last time, fetched and handed back. Empty on a
+    /// first ask.
+    #[serde(default)]
+    pub frames: Vec<Frame>,
 }
 
 /// What comes back.
@@ -81,16 +103,32 @@ pub struct AgentReply {
     pub operations: Vec<serde_json::Value>,
     /// Who answered, so the panel can say so.
     pub model: String,
+    /// Moments on the timeline it wants to see before it can answer.
+    ///
+    /// When this comes back non-empty, nothing has been decided yet: the
+    /// editor is expected to fetch these frames and ask again with them.
+    pub looks: Vec<f64>,
 }
 
-/// The one tool the model is given.
+/// The most frames one question may ask for.
 ///
-/// One call carrying a list rather than one call per edit: the editor
-/// applies a batch as a single step with a single entry in the undo
-/// history, and a model making eight separate calls would be describing
-/// something the editor cannot do.
-fn tools() -> serde_json::Value {
-    serde_json::json!([{
+/// A model told it may look will look at everything unless it is given a
+/// number. Each frame is a picture somebody pays for, so it is asked to
+/// choose.
+const MOST_FRAMES: usize = 8;
+
+/// The tools the model is given.
+///
+/// `propose_edits` carries a list rather than being called once per edit:
+/// the editor applies a batch as a single step with a single entry in the
+/// undo history, and a model making eight separate calls would be
+/// describing something the editor cannot do.
+///
+/// `look_at` is only offered when something has been marked as the eyes.
+/// Offering it without is worse than not offering it at all: the model
+/// would ask for frames that never arrive.
+fn tools(can_look: bool) -> serde_json::Value {
+    let mut all = vec![serde_json::json!({
         "type": "function",
         "function": {
             "name": "propose_edits",
@@ -146,7 +184,42 @@ fn tools() -> serde_json::Value {
                 "required": ["operations"]
             }
         }
-    }])
+    })];
+
+    if can_look {
+        all.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "look_at",
+                "description": format!(
+                    "Ask to see what is on screen at particular moments. Use this \
+                     when the question is about the picture and the transcript does \
+                     not answer it — for example when somebody says \"this\" or \
+                     \"here\" without saying what it is. The frames come back and \
+                     you are asked again. At most {MOST_FRAMES} moments, so choose \
+                     the ones that matter. Do not use this when the transcript \
+                     already answers the question."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "seconds": {
+                            "type": "array",
+                            "items": { "type": "number" },
+                            "description": "Moments on the timeline, in seconds."
+                        },
+                        "why": {
+                            "type": "string",
+                            "description": "One sentence on what you are looking for."
+                        }
+                    },
+                    "required": ["seconds"]
+                }
+            }
+        }));
+    }
+
+    serde_json::Value::Array(all)
 }
 
 fn client() -> Result<reqwest::blocking::Client, String> {
@@ -224,13 +297,42 @@ fn operations_in(message: &Message) -> Vec<serde_json::Value> {
     out
 }
 
+/// The moments it asked to see, capped and tidied.
+///
+/// Sorted and de-duplicated because a model asking for the same second
+/// twice should not be charged for it twice, and capped because the
+/// number in the tool's description is a request, not a guarantee.
+fn looks_in(message: &Message) -> Vec<f64> {
+    let mut out: Vec<f64> = Vec::new();
+    for call in &message.tool_calls {
+        if call.function.name != "look_at" {
+            continue;
+        }
+        let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.function.arguments) else {
+            continue;
+        };
+        let Some(list) = args.get("seconds").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for at in list.iter().filter_map(|v| v.as_f64()) {
+            if at.is_finite() && at >= 0.0 {
+                out.push((at * 1000.0).round() / 1000.0);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    out.dedup();
+    out.truncate(MOST_FRAMES);
+    out
+}
+
 /// What the model said, and the sentence it gave for its proposal.
 fn text_in(message: &Message) -> String {
     let said = message.content.clone().unwrap_or_default();
     let why = message
         .tool_calls
         .iter()
-        .filter(|c| c.function.name == "propose_edits")
+        .filter(|c| c.function.name == "propose_edits" || c.function.name == "look_at")
         .filter_map(|c| serde_json::from_str::<serde_json::Value>(&c.function.arguments).ok())
         .find_map(|args| args.get("why").and_then(|v| v.as_str()).map(String::from))
         .unwrap_or_default();
@@ -275,12 +377,41 @@ pub fn ask(app: &tauri::AppHandle, ask: AgentAsk) -> Result<AgentReply, String> 
         }
         messages.push(serde_json::json!({ "role": turn.role, "content": turn.content }));
     }
-    messages.push(serde_json::json!({ "role": "user", "content": ask.question }));
+    // The question, and any frames it asked for last time.
+    //
+    // A message with pictures in it is a list of parts rather than a
+    // string: that is the wire format, and it is also why the frames go
+    // with the question rather than in a message of their own — the
+    // model is being asked again, not told something new.
+    if ask.frames.is_empty() {
+        messages.push(serde_json::json!({ "role": "user", "content": ask.question }));
+    } else {
+        let mut parts = vec![serde_json::json!({
+            "type": "text",
+            "text": format!(
+                "Here are the frames you asked for, in order. The question was: {}",
+                ask.question
+            ),
+        })];
+        for frame in &ask.frames {
+            let bytes = std::fs::read(&frame.path)
+                .map_err(|e| format!("Could not read the frame at {:.2}s: {e}", frame.at_seconds))?;
+            parts.push(serde_json::json!({
+                "type": "text",
+                "text": format!("At {:.2}s:", frame.at_seconds),
+            }));
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:image/jpeg;base64,{}", encode_base64(&bytes)) },
+            }));
+        }
+        messages.push(serde_json::json!({ "role": "user", "content": parts }));
+    }
 
     let body = serde_json::json!({
         "model": chosen.model,
         "messages": messages,
-        "tools": tools(),
+        "tools": tools(ask.can_look && ask.frames.is_empty()),
         "stream": false,
     });
 
@@ -323,9 +454,41 @@ pub fn ask(app: &tauri::AppHandle, ask: AgentAsk) -> Result<AgentReply, String> 
 
     Ok(AgentReply {
         operations: operations_in(&message),
+        looks: looks_in(&message),
         text: text_in(&message),
         model: format!("{} · {}", chosen.provider_name, chosen.model),
     })
+}
+
+/// Base64, written out rather than pulled in.
+///
+/// One small function against one more dependency to audit in a project
+/// somebody else will read: this is the whole of it, and it has a test.
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -438,12 +601,87 @@ mod tests {
         assert_eq!(ops[1]["atSeconds"], 2);
     }
 
+    /// The eyes are only offered when something has been marked as them.
+    /// Offering the tool without is worse than not offering it: the model
+    /// would ask for frames that never come.
+    #[test]
+    fn looking_is_only_offered_when_there_are_eyes() {
+        assert!(tools(true).to_string().contains("look_at"));
+        assert!(!tools(false).to_string().contains("look_at"));
+        // And proposing edits is offered either way.
+        assert!(tools(false).to_string().contains("propose_edits"));
+    }
+
+    #[test]
+    fn the_moments_asked_for_are_read_out_of_the_call() {
+        let m = message(
+            r#"{
+              "tool_calls": [{
+                "function": {
+                  "name": "look_at",
+                  "arguments": "{\"seconds\":[12.5,4.25,12.5],\"why\":\"checking the screen\"}"
+                }
+              }]
+            }"#,
+        );
+        // Sorted, and the repeat dropped: the same second twice is one
+        // picture, not two to pay for.
+        assert_eq!(looks_in(&m), vec![4.25, 12.5]);
+        assert!(text_in(&m).contains("checking the screen"));
+        // Asking to look is not proposing an edit.
+        assert!(operations_in(&m).is_empty());
+    }
+
+    /// However many it asks for, it gets the cap.
+    #[test]
+    fn it_cannot_ask_for_more_frames_than_the_cap() {
+        let many: Vec<String> = (0..40).map(|i| i.to_string()).collect();
+        let args = format!("{{\"seconds\":[{}]}}", many.join(","));
+        let m = message(&format!(
+            r#"{{ "tool_calls": [{{ "function": {{ "name": "look_at", "arguments": {} }} }}] }}"#,
+            serde_json::to_string(&args).unwrap()
+        ));
+        assert_eq!(looks_in(&m).len(), MOST_FRAMES);
+    }
+
+    /// A moment that is not a moment is dropped rather than fetched.
+    #[test]
+    fn nonsense_moments_are_dropped() {
+        let m = message(
+            r#"{
+              "tool_calls": [{
+                "function": {
+                  "name": "look_at",
+                  "arguments": "{\"seconds\":[-4, 3.5, null, \"soon\"]}"
+                }
+              }]
+            }"#,
+        );
+        assert_eq!(looks_in(&m), vec![3.5]);
+    }
+
+    /// The base64 here is written out by hand rather than pulled in, so
+    /// it is checked against the examples in the standard.
+    #[test]
+    fn base64_is_written_correctly() {
+        assert_eq!(encode_base64(b""), "");
+        assert_eq!(encode_base64(b"f"), "Zg==");
+        assert_eq!(encode_base64(b"fo"), "Zm8=");
+        assert_eq!(encode_base64(b"foo"), "Zm9v");
+        assert_eq!(encode_base64(b"foob"), "Zm9vYg==");
+        assert_eq!(encode_base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(encode_base64(b"foobar"), "Zm9vYmFy");
+        // Bytes that are not text, which is what a JPEG is.
+        assert_eq!(encode_base64(&[0x00, 0xFF, 0x80]), "AP+A");
+        assert_eq!(encode_base64(&[0xFF; 3]), "////");
+    }
+
     /// Every operation the editor knows about is offered to the model.
     /// One missing from here is one it can never propose, however well it
     /// would have answered the question.
     #[test]
     fn every_operation_is_offered() {
-        let schema = tools().to_string();
+        let schema = tools(true).to_string();
         for kind in [
             "cut",
             "removeClips",
